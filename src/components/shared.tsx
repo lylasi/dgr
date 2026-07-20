@@ -1,0 +1,329 @@
+"use client";
+
+import Image from "next/image";
+import type { LucideIcon } from "lucide-react";
+import {
+  Award,
+  BookOpen,
+  Check,
+  Clock3,
+  Code2,
+  Gamepad2,
+  Gift,
+  HeartHandshake,
+  Home,
+  ListChecks,
+  Medal,
+  Play,
+  Settings,
+  ShieldCheck,
+  Sparkles,
+  Star,
+  UserRound,
+  Video,
+} from "lucide-react";
+import { useEffect, useState } from "react";
+import { formatClock, formatDuration } from "@/lib/time";
+
+export const THEME_COLORS: Record<string, { bg: string; ink: string; ring: string }> = {
+  purple: { bg: "#eee9ff", ink: "#6246c7", ring: "#b8a6ff" },
+  blue: { bg: "#dff5ff", ink: "#286d9b", ring: "#8bd9fb" },
+  green: { bg: "#dff8e8", ink: "#26754a", ring: "#8ee0ae" },
+  orange: { bg: "#fff0d9", ink: "#9a5b1f", ring: "#ffc77f" },
+  pink: { bg: "#ffe7f2", ink: "#a74472", ring: "#f7a8cc" },
+};
+
+const avatarIcons: Record<string, LucideIcon> = {
+  star: Star,
+  rocket: Sparkles,
+  book: BookOpen,
+  medal: Medal,
+  heart: HeartHandshake,
+  code: Code2,
+};
+
+export const AVATARS = ["star", "rocket", "book", "medal", "heart", "code"];
+export const THEMES = Object.keys(THEME_COLORS);
+
+export function Avatar({ avatar, theme, imageUrl, size = 54 }: { avatar: string; theme: string; imageUrl?: string | null; size?: number }) {
+  const Icon = avatarIcons[avatar] || Star;
+  const colors = THEME_COLORS[theme] || THEME_COLORS.purple;
+  if (imageUrl) {
+    return (
+      <div
+        className="shrink-0 overflow-hidden rounded-[22px] border-2 bg-white"
+        style={{ width: size, height: size, borderColor: colors.ring }}
+      >
+        <Image
+          src={imageUrl}
+          alt=""
+          width={size}
+          height={size}
+          className="h-full w-full object-cover"
+          unoptimized
+        />
+      </div>
+    );
+  }
+  return (
+    <div
+      className="grid shrink-0 place-items-center rounded-[22px] border-2"
+      style={{ width: size, height: size, background: colors.bg, color: colors.ink, borderColor: colors.ring }}
+      aria-hidden="true"
+    >
+      <Icon size={Math.round(size * 0.48)} strokeWidth={2.7} />
+    </div>
+  );
+}
+
+export function PencilMascot({ compact = false }: { compact?: boolean }) {
+  return (
+    <div className={compact ? "w-20" : "w-32"} aria-label="微笑的铅笔小助手" role="img">
+      <svg viewBox="0 0 150 170" className="h-auto w-full drop-shadow-[0_8px_8px_rgba(75,55,130,0.16)]">
+        <g transform="rotate(7 75 85)">
+          <path d="M48 16h54l15 23v101c0 12-10 22-22 22H55c-12 0-22-10-22-22V39z" fill="#ffd85e" stroke="#594a85" strokeWidth="6" />
+          <path d="M48 16h54l15 23H33z" fill="#ff8f7e" stroke="#594a85" strokeWidth="6" strokeLinejoin="round" />
+          <path d="M33 39h84v22H33z" fill="#a98cff" stroke="#594a85" strokeWidth="6" />
+          <path d="M48 162h54l15-22H33z" fill="#f2c99f" stroke="#594a85" strokeWidth="6" strokeLinejoin="round" />
+          <path d="M67 162h17l-8 10z" fill="#4b416d" />
+          <circle cx="60" cy="93" r="5" fill="#4b416d" />
+          <circle cx="91" cy="93" r="5" fill="#4b416d" />
+          <path d="M61 113c8 9 21 9 29 0" fill="none" stroke="#4b416d" strokeWidth="5" strokeLinecap="round" />
+          <circle cx="50" cy="107" r="7" fill="#ff9b8c" opacity=".55" />
+          <circle cx="101" cy="107" r="7" fill="#ff9b8c" opacity=".55" />
+        </g>
+      </svg>
+    </div>
+  );
+}
+
+export function TimeCoin({ seconds, signed = false, compact = false }: { seconds: number; signed?: boolean; compact?: boolean }) {
+  const sign = signed ? (seconds > 0 ? "+" : seconds < 0 ? "−" : "") : "";
+  return (
+    <span className="inline-flex items-center gap-1.5 font-black tabular-nums">
+      <span className="grid h-7 w-7 place-items-center rounded-full border-2 border-amber-500 bg-amber-200 text-amber-800 shadow-[0_2px_0_#d99f24]">
+        <Clock3 size={15} strokeWidth={3} />
+      </span>
+      <span>{sign}{formatDuration(Math.abs(seconds), !compact)}</span>
+    </span>
+  );
+}
+
+export function ConsumptionStartDialog({
+  activityName,
+  balanceSeconds,
+  workerName,
+  busy = false,
+  onCancel,
+  onConfirm,
+}: {
+  activityName: string;
+  balanceSeconds: number;
+  workerName?: string;
+  busy?: boolean;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && !busy) onCancel();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [busy, onCancel]);
+
+  return (
+    <div
+      className="fixed inset-0 z-[70] flex items-end justify-center bg-slate-900/45 p-3 sm:items-center sm:p-6"
+      role="presentation"
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget && !busy) onCancel();
+      }}
+    >
+      <section
+        className="page-enter w-full max-w-md rounded-[28px] bg-white p-5 shadow-2xl sm:p-6"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="consumption-start-title"
+      >
+        <div className="mx-auto grid h-16 w-16 place-items-center rounded-full border-4 border-amber-300 bg-amber-100 text-amber-700">
+          <Clock3 size={31} strokeWidth={3} />
+        </div>
+        <div className="mt-4 text-center">
+          <h2 id="consumption-start-title" className="text-xl font-black">确定开始消耗计时吗？</h2>
+          <p className="mt-1 text-sm font-semibold leading-6 text-slate-500">准备开始“{activityName}”</p>
+        </div>
+        <div className="mt-4 rounded-2xl bg-purple-50 p-4 text-center text-purple-800">
+          <p className="text-xs font-black text-purple-600">{workerName ? `${workerName} 现在还剩` : "你现在还剩"}</p>
+          <div className="mt-2 text-lg"><TimeCoin seconds={balanceSeconds} /></div>
+        </div>
+        <p className="mt-4 rounded-2xl bg-orange-50 px-4 py-3 text-sm font-bold leading-6 text-orange-800">开始后会按秒消耗时间币，点击“结束”才会停止。误点后可以使用“误触取消”。</p>
+        <div className="mt-5 grid grid-cols-2 gap-2">
+          <button type="button" className="secondary-button" disabled={busy} onClick={onCancel}>先不开始</button>
+          <button type="button" className="primary-button" disabled={busy || balanceSeconds <= 0} onClick={onConfirm}>
+            <Play className="mr-1 inline" size={18} />{busy ? "正在开始…" : "确定开始"}
+          </button>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+export function useLiveSeconds(startedAt?: number | null) {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!startedAt) return;
+    const timer = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [startedAt]);
+  return startedAt ? Math.max(0, Math.floor((now - startedAt) / 1000)) : 0;
+}
+
+export function LiveClock({ startedAt, className = "" }: { startedAt: number; className?: string }) {
+  const seconds = useLiveSeconds(startedAt);
+  return <span className={`font-black tabular-nums ${className}`}>{formatClock(seconds)}</span>;
+}
+
+type NavItem<T extends string> = {
+  id: T;
+  label: string;
+  icon: LucideIcon;
+  badge?: number;
+  disabled?: boolean;
+  disabledLabel?: string;
+};
+
+export function BottomNav<T extends string>({
+  items,
+  active,
+  onChange,
+}: {
+  items: NavItem<T>[];
+  active: T;
+  onChange: (value: T) => void;
+}) {
+  return (
+    <nav className="fixed inset-x-0 bottom-0 z-30 border-t border-purple-100 bg-white/95 pb-[max(8px,env(safe-area-inset-bottom))] pt-2 shadow-[0_-8px_24px_rgba(64,54,110,0.1)] backdrop-blur md:left-1/2 md:max-w-3xl md:-translate-x-1/2 md:rounded-t-3xl md:border-x">
+      <div className="mx-auto flex max-w-3xl items-center justify-around px-2">
+        {items.map((item) => {
+          const Icon = item.icon;
+          const selected = active === item.id;
+          return (
+            <button
+              key={item.id}
+              type="button"
+              className={`relative flex h-14 min-h-14 min-w-0 flex-1 flex-col items-center justify-center gap-0.5 rounded-2xl px-1 text-[11px] font-black transition ${selected ? "bg-purple-100 text-purple-700" : "text-slate-500"} ${item.disabled ? "opacity-55" : ""}`}
+              onClick={() => onChange(item.id)}
+              disabled={item.disabled}
+              aria-current={selected ? "page" : undefined}
+              aria-label={item.disabled ? `${item.label}，${item.disabledLabel || "暂未开放"}` : item.label}
+              title={item.disabled ? item.disabledLabel || "暂未开放" : undefined}
+            >
+              <Icon size={22} strokeWidth={selected ? 3 : 2.3} />
+              <span className="whitespace-nowrap leading-none">{item.label}</span>
+              {item.disabled && <span className="text-[9px] leading-none text-slate-400">{item.disabledLabel || "暂未开放"}</span>}
+              {Boolean(item.badge) && (
+                <span className="absolute right-1.5 top-1 min-w-5 rounded-full bg-red-500 px-1 text-center text-[10px] leading-5 text-white">
+                  {item.badge! > 99 ? "99+" : item.badge}
+                </span>
+              )}
+            </button>
+          );
+        })}
+      </div>
+    </nav>
+  );
+}
+
+export const workerNavItems = [
+  { id: "home" as const, label: "首页", icon: Home },
+  { id: "tasks" as const, label: "打工", icon: ListChecks },
+  { id: "running" as const, label: "进度", icon: Play },
+  { id: "rewards" as const, label: "奖励", icon: Gift, disabled: true, disabledLabel: "未开" },
+  { id: "ledger" as const, label: "明细", icon: Award },
+  { id: "me" as const, label: "我的", icon: UserRound },
+];
+
+export const adminNavItems = [
+  { id: "home" as const, label: "总览", icon: Home },
+  { id: "publish" as const, label: "发布", icon: ListChecks },
+  { id: "reviews" as const, label: "审核", icon: ShieldCheck },
+  { id: "workers" as const, label: "角色", icon: UserRound },
+  { id: "settings" as const, label: "设置", icon: Settings },
+];
+
+export function EmptyState({ title, text, action }: { title: string; text: string; action?: React.ReactNode }) {
+  return (
+    <div className="app-card flex flex-col items-center px-6 py-9 text-center">
+      <PencilMascot compact />
+      <h3 className="mt-2 text-lg font-black">{title}</h3>
+      <p className="mt-1 max-w-sm text-sm font-semibold leading-6 text-slate-500">{text}</p>
+      {action && <div className="mt-4">{action}</div>}
+    </div>
+  );
+}
+
+export function LoadingScreen() {
+  return (
+    <main className="grid min-h-screen place-items-center px-6">
+      <div className="flex flex-col items-center">
+        <PencilMascot />
+        <p className="mt-3 animate-pulse text-lg font-black text-purple-700">正在打开时间小金库…</p>
+      </div>
+    </main>
+  );
+}
+
+export function AppHeader({
+  title,
+  subtitle,
+  avatar,
+  avatarUrl,
+  theme,
+  onSwitch,
+  admin = false,
+}: {
+  title: string;
+  subtitle: string;
+  avatar?: string;
+  avatarUrl?: string | null;
+  theme?: string;
+  onSwitch: () => void;
+  admin?: boolean;
+}) {
+  return (
+    <header className="mx-auto flex w-full max-w-3xl items-center justify-between px-4 pb-3 pt-[max(14px,env(safe-area-inset-top))] sm:px-6">
+      <div className="flex min-w-0 items-center gap-3">
+        {admin ? (
+          <div className="grid h-13 w-13 shrink-0 place-items-center rounded-[20px] border-2 border-purple-300 bg-purple-100 text-purple-700">
+            <ShieldCheck size={28} strokeWidth={2.8} />
+          </div>
+        ) : (
+          <Avatar avatar={avatar || "star"} theme={theme || "purple"} imageUrl={avatarUrl} size={52} />
+        )}
+        <div className="min-w-0">
+          <h1 className="truncate text-lg font-black sm:text-xl">{title}</h1>
+          <p className="truncate text-xs font-bold text-slate-500 sm:text-sm">{subtitle}</p>
+        </div>
+      </div>
+      <button type="button" onClick={onSwitch} className="secondary-button !min-h-11 !px-3 text-sm">
+        切换
+      </button>
+    </header>
+  );
+}
+
+export function Toast({ message, tone = "success" }: { message: string; tone?: "success" | "error" }) {
+  return (
+    <div className={`fixed left-1/2 top-[max(16px,env(safe-area-inset-top))] z-50 flex max-w-[calc(100%-32px)] -translate-x-1/2 items-center gap-2 rounded-2xl px-4 py-3 text-sm font-black text-white shadow-xl ${tone === "success" ? "bg-emerald-600" : "bg-red-500"}`} role="status">
+      {tone === "success" ? <Check size={19} strokeWidth={3} /> : <Clock3 size={19} strokeWidth={3} />}
+      <span>{message}</span>
+    </div>
+  );
+}
+
+export function activityIcon(icon: string) {
+  if (icon === "video") return Video;
+  if (icon === "gamepad") return Gamepad2;
+  return Clock3;
+}

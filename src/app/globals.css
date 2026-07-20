@@ -1,0 +1,206 @@
+@import "tailwindcss";
+
+:root {
+  --ink: #29304a;
+  --muted: #747b94;
+  --purple: #7658e8;
+  --purple-dark: #5c3fd0;
+  --sky: #dff5ff;
+  --mint: #dff8e8;
+  --sun: #fff0a9;
+  --coral: #ff826f;
+  --card: rgba(255, 255, 255, 0.94);
+  --shadow: 0 12px 32px rgba(69, 62, 126, 0.12);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  min-width: 320px;
+  background: #f7f5ff;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  color: var(--ink);
+  background:
+    radial-gradient(circle at 10% 2%, rgba(255, 224, 120, 0.4), transparent 30%),
+    radial-gradient(circle at 90% 8%, rgba(128, 218, 255, 0.32), transparent 28%),
+    linear-gradient(180deg, #fbfaff 0%, #f5f8ff 48%, #f8fbff 100%);
+  font-family: ui-rounded, "SF Pro Rounded", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+button,
+input,
+textarea,
+select {
+  font: inherit;
+}
+
+button {
+  touch-action: manipulation;
+}
+
+button:focus-visible,
+input:focus-visible,
+textarea:focus-visible,
+select:focus-visible {
+  outline: 3px solid rgba(118, 88, 232, 0.32);
+  outline-offset: 2px;
+}
+
+.app-card {
+  border: 2px solid rgba(118, 88, 232, 0.09);
+  border-radius: 24px;
+  background: var(--card);
+  box-shadow: var(--shadow);
+}
+
+.soft-card {
+  border: 1.5px solid rgba(73, 72, 111, 0.08);
+  border-radius: 20px;
+  background: rgba(255, 255, 255, 0.84);
+}
+
+.purple-gradient-card {
+  background: linear-gradient(135deg, #7658e8 0%, #6254d9 52%, #4658c9 100%);
+}
+
+.blue-gradient-card {
+  background: linear-gradient(90deg, #eff9ff 0%, #f2edff 100%);
+}
+
+.orange-gradient-card {
+  background: linear-gradient(135deg, #ffedd5 0%, #fffbeb 100%);
+}
+
+.review-gradient-card {
+  background: linear-gradient(90deg, #f2edff 0%, #eff9ff 100%);
+}
+
+.primary-button,
+.secondary-button,
+.danger-button,
+.success-button {
+  min-height: 48px;
+  border: 0;
+  border-radius: 16px;
+  padding: 11px 18px;
+  font-weight: 800;
+  transition: transform 160ms ease, box-shadow 160ms ease, opacity 160ms ease;
+}
+
+.primary-button {
+  color: white;
+  background: linear-gradient(135deg, var(--purple), #9579f6);
+  box-shadow: 0 7px 0 #5840bf, 0 12px 20px rgba(93, 66, 194, 0.2);
+}
+
+.secondary-button {
+  color: #5d48bd;
+  background: #eee9ff;
+  box-shadow: 0 4px 0 #d4c9ff;
+}
+
+.success-button {
+  color: #145936;
+  background: #bdf0cf;
+  box-shadow: 0 4px 0 #8bd5aa;
+}
+
+.danger-button {
+  color: #8b2f27;
+  background: #ffe1dc;
+  box-shadow: 0 4px 0 #f6b9af;
+}
+
+.primary-button:active,
+.secondary-button:active,
+.success-button:active,
+.danger-button:active {
+  transform: translateY(3px);
+  box-shadow: none;
+}
+
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+  transform: none !important;
+  box-shadow: none !important;
+}
+
+.field {
+  width: 100%;
+  min-height: 48px;
+  border: 2px solid #e5e1f3;
+  border-radius: 15px;
+  background: white;
+  padding: 11px 14px;
+  color: var(--ink);
+}
+
+.field::placeholder {
+  color: #a3a6b7;
+}
+
+.label {
+  display: block;
+  margin-bottom: 7px;
+  color: #555c75;
+  font-size: 14px;
+  font-weight: 800;
+}
+
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 30px;
+  border-radius: 999px;
+  padding: 5px 10px;
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.page-enter {
+  animation: page-enter 220ms ease both;
+}
+
+.coin-pop {
+  animation: coin-pop 500ms cubic-bezier(0.2, 1.5, 0.4, 1) both;
+}
+
+@keyframes page-enter {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes coin-pop {
+  0% { transform: scale(0.7) rotate(-8deg); opacity: 0; }
+  70% { transform: scale(1.08) rotate(3deg); opacity: 1; }
+  100% { transform: scale(1) rotate(0); }
+}
+
+@media (hover: hover) {
+  .primary-button:hover,
+  .secondary-button:hover,
+  .success-button:hover,
+  .danger-button:hover {
+    transform: translateY(-2px);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
