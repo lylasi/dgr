@@ -16,6 +16,7 @@
 
 # Runtime data and SQLite sidecar files
 /data/
+/public/avatars/
 *.db
 *.db-shm
 *.db-wal
@@ -27,6 +28,11 @@
 .env*
 !.env.example
 *.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.keystore
 
 # Logs and caches
 *.log

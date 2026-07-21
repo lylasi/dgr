@@ -7,7 +7,6 @@ const configuredDevOrigins = (process.env.ALLOWED_DEV_ORIGINS ?? "")
 const allowedDevOrigins = [...new Set([
   "localhost",
   "127.0.0.1",
-  "10.10.10.5",
   ...configuredDevOrigins,
 ])];
 

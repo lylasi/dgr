@@ -5,8 +5,8 @@ services:
     ports:
       - "3000:3000"
     environment:
-      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-123456}
-      SESSION_SECRET: ${SESSION_SECRET:-local-docker-session-secret-change-before-public-use}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:?请设置 ADMIN_PASSWORD}
+      SESSION_SECRET: ${SESSION_SECRET:?请设置至少32位的 SESSION_SECRET}
       APP_TIMEZONE: ${APP_TIMEZONE:-Asia/Shanghai}
       DATABASE_PATH: /app/data/pen-worker.db
       SESSION_MAX_AGE_DAYS: ${SESSION_MAX_AGE_DAYS:-180}

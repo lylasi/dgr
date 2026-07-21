@@ -31,7 +31,7 @@
 - 每日奖励、任务奖励、消费及余额调整明细。
 - SQLite 服务端持久化、手机端卡通响应式界面。
 
-当前角色 `PEN` 已配置项目头像资源 [public/avatars/pen-avatar.webp](public/avatars/pen-avatar.webp)。图片为 256×256 WebP，约 12KB；新上传的头像也会先在浏览器端裁切压缩，再保存到 SQLite，因此不同设备会看到相同头像。
+角色照片会先在浏览器端裁切压缩，再保存到 SQLite，因此不同设备会看到相同头像。运行时头像属于本地业务数据，不提交到 Git。
 
 完整产品与技术计划见 [docs/development-plan.md](docs/development-plan.md)，奖励券第一阶段规则见 [docs/reward-system-plan.md](docs/reward-system-plan.md)。
 
@@ -46,13 +46,7 @@ npm run dev
 
 打开 <http://localhost:3000>。
 
-仓库中已经准备了仅供本地开发的 `.env.local`，默认管理员密码是：
-
-```text
-123456
-```
-
-如果应用需要开放到局域网以外，请先修改这个密码和 `SESSION_SECRET`。
+首次运行前，请从 `.env.example` 创建不提交到 Git 的 `.env.local`，设置管理员密码和至少 32 位的随机 `SESSION_SECRET`。
 
 管理员首次登录后，在“打工人”页面创建第一个角色并设置独立 PIN。SQLite 会自动创建在 `data/pen-worker.db`。
 
@@ -67,16 +61,16 @@ APP_TIMEZONE=Asia/Shanghai
 DATABASE_PATH=./data/pen-worker.db
 SESSION_MAX_AGE_DAYS=180
 COOKIE_SECURE=false
-ALLOWED_DEV_ORIGINS=10.10.10.5
+ALLOWED_DEV_ORIGINS=你的局域网主机名或IP
 ```
 
 - 修改 `ADMIN_PASSWORD` 并重启后，旧管理员登录自动失效。
 - `DATABASE_PATH` 必须位于持久化磁盘。
 - 家庭局域网直接使用 HTTP 时保持 `COOKIE_SECURE=false`；配置 HTTPS 后改为 `true`。
 - 浏览器只保存签名后的安全 Cookie，不保存明文密码和余额数据。
-- `ALLOWED_DEV_ORIGINS` 用于局域网开发访问；有多个来源时使用英文逗号分隔，例如 `10.10.10.5,192.168.1.20`。
+- `ALLOWED_DEV_ORIGINS` 用于局域网开发访问；有多个来源时使用英文逗号分隔。
 
-局域网开发时，用运行本项目电脑的 IP 打开，例如 `http://10.10.10.5:3000`。修改 `ALLOWED_DEV_ORIGINS` 后必须停止并重新运行 `npm run dev`，Next.js 才会读取新配置。
+局域网开发时，用运行本项目电脑的实际 IP 打开。修改 `ALLOWED_DEV_ORIGINS` 后必须停止并重新运行 `npm run dev`，Next.js 才会读取新配置。
 
 ## 常用命令
 
