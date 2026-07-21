@@ -18,7 +18,7 @@ export function getConfig(): AppConfig {
   const sessionSecret = process.env.SESSION_SECRET?.trim();
 
   if (!adminPassword) {
-    throw new Error("缺少 ADMIN_PASSWORD，请在 .env.local 中配置管理员密码。");
+    throw new Error("缺少 ADMIN_PASSWORD，请通过环境变量、.env.local 或 .env 配置管理员密码。");
   }
   if (!sessionSecret || sessionSecret.length < 32) {
     throw new Error("SESSION_SECRET 必须至少包含 32 个字符。");

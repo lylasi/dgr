@@ -1,6 +1,7 @@
 node_modules
 .next
 data
+public/avatars
 coverage
 .git
 .env*

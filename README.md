@@ -40,37 +40,79 @@
 环境要求：Node.js 22 或更高版本。
 
 ```bash
-npm install
+npm ci
+cp .env.example .env.local
+# 编辑 .env.local，至少填写 ADMIN_PASSWORD 和 SESSION_SECRET
 npm run dev
 ```
 
-打开 <http://localhost:3000>。
+打开 `.env.local` 中 `PORT` 对应的地址，默认是 <http://localhost:3000>。例如临时使用 3002 端口：
 
-首次运行前，请从 `.env.example` 创建不提交到 Git 的 `.env.local`，设置管理员密码和至少 32 位的随机 `SESSION_SECRET`。
-
-管理员首次登录后，在“打工人”页面创建第一个角色并设置独立 PIN。SQLite 会自动创建在 `data/pen-worker.db`。
-
-## 配置
-
-复制 `.env.example` 或编辑未提交到 Git 的 `.env.local`：
-
-```dotenv
-ADMIN_PASSWORD=你的管理员密码
-SESSION_SECRET=至少32位随机字符串
-APP_TIMEZONE=Asia/Shanghai
-DATABASE_PATH=./data/pen-worker.db
-SESSION_MAX_AGE_DAYS=180
-COOKIE_SECURE=false
-ALLOWED_DEV_ORIGINS=你的局域网主机名或IP
+```bash
+PORT=3002 npm run dev
 ```
 
-- 修改 `ADMIN_PASSWORD` 并重启后，旧管理员登录自动失效。
-- `DATABASE_PATH` 必须位于持久化磁盘。
-- 家庭局域网直接使用 HTTP 时保持 `COOKIE_SECURE=false`；配置 HTTPS 后改为 `true`。
-- 浏览器只保存签名后的安全 Cookie，不保存明文密码和余额数据。
-- `ALLOWED_DEV_ORIGINS` 用于局域网开发访问；有多个来源时使用英文逗号分隔。
+管理员首次登录后，在“打工人”页面创建第一个角色并设置独立 PIN。SQLite 默认创建在 `data/pen-worker.db`。
 
-局域网开发时，用运行本项目电脑的实际 IP 打开。修改 `ALLOWED_DEV_ORIGINS` 后必须停止并重新运行 `npm run dev`，Next.js 才会读取新配置。
+## 环境配置文件
+
+仓库提供带完整注释的 `.env.example`。它只是模板，可以提交到 Git，不能填写真实密码。
+
+非 Docker 推荐使用 `.env.local`：
+
+```bash
+cp .env.example .env.local
+```
+
+Docker Compose 推荐使用 `.env`：
+
+```bash
+cp .env.example .env
+```
+
+这三个文件的区别：
+
+- `.env.example`：配置说明和示例，不会作为秘密配置使用；保留空的必填项并提交到 Git。
+- `.env`：项目/部署环境的通用配置。Docker Compose会自动读取它来替换 `compose.yaml` 中的 `${变量}`。
+- `.env.local`：当前机器的私有覆盖配置，适合非 Docker 开发和部署；不应提交到 Git。Docker Compose默认不会读取它。
+
+本仓库的 `npm run dev` 和 `npm start` 会依次读取 `.env`、`.env.local`，后者覆盖前者；终端中显式传入的环境变量优先级最高。例如：
+
+```bash
+PORT=3002 npm start
+```
+
+`.env` 和 `.env.local` 都已被 `.gitignore` 排除。生产环境也可以完全不创建文件，直接由 systemd、容器平台或终端提供环境变量。
+
+主要变量如下，完整说明和推荐值见 `.env.example`：
+
+| 变量 | 是否必填 | 作用 |
+| --- | --- | --- |
+| `ADMIN_PASSWORD` | 是 | 唯一管理员登录密码；修改并重启会使旧管理员登录失效 |
+| `SESSION_SECRET` | 是 | 签名登录 Cookie，至少 32 个字符；修改会使所有设备重新登录 |
+| `PORT` | 否 | Web 服务监听端口，默认 `3000` |
+| `APP_TIMEZONE` | 否 | 每日奖励和自然日计算时区，默认 `Asia/Shanghai` |
+| `DATABASE_PATH` | 否 | 非 Docker 的 SQLite 文件路径，默认 `./data/pen-worker.db` |
+| `SESSION_MAX_AGE_DAYS` | 否 | 登录 Cookie 保留天数，默认 `180` |
+| `COOKIE_SECURE` | 否 | HTTPS 时设为 `true`；局域网 HTTP 保持 `false` |
+| `ALLOWED_DEV_ORIGINS` | 否 | 仅开发模式使用，允许局域网访问 `next dev` 的主机名或 IP |
+| `DATA_DIR` | 否 | 仅 Docker Compose 使用，宿主机持久化数据目录，默认 `./data` |
+
+生成随机 Session Secret 的一种方式：
+
+```bash
+openssl rand -hex 32
+```
+
+## 非 Docker 正式部署
+
+```bash
+npm ci
+npm run build
+npm start
+```
+
+`npm ci` 会完全按照 `package-lock.json` 安装。生产运行时可以使用 systemd、Supervisor 或其他进程管理器托管 `npm start`。修改配置后需要重启进程。
 
 ## 常用命令
 
@@ -85,13 +127,41 @@ npm start
 
 ## Docker 部署
 
+Docker Compose 默认使用宿主机目录映射，不使用 Docker 命名卷：
+
+```text
+宿主机 ${DATA_DIR:-./data}  →  容器 /app/data
+数据库                      →  /app/data/pen-worker.db
+```
+
+首次启动：
+
 ```bash
-ADMIN_PASSWORD='换成你的密码' \
-SESSION_SECRET='换成至少32位随机字符串' \
+cp .env.example .env
+# 编辑 .env，至少填写 ADMIN_PASSWORD 和 SESSION_SECRET
+mkdir -p data
 docker compose up --build -d
 ```
 
-Docker Compose 会把 SQLite 存放到持久化卷 `pen_data`。生产环境应在应用前配置 HTTPS 反向代理。
+默认访问 <http://localhost:3000>。修改 `.env` 中的配置即可选择其他端口或数据目录：
+
+```dotenv
+PORT=3002
+DATA_DIR=/srv/pen-worker/data
+```
+
+对应效果是宿主机 `3002` 映射到容器 `3002`，SQLite 保存到 `/srv/pen-worker/data/pen-worker.db`。请确保 Docker 对该目录有读写权限。
+
+常用操作：
+
+```bash
+docker compose logs -f pen-worker
+docker compose restart pen-worker
+docker compose down
+docker compose up --build -d
+```
+
+`docker compose down` 不会删除目录映射中的数据库。生产环境应在应用前配置 HTTPS 反向代理，并在使用 HTTPS 后设置 `COOKIE_SECURE=true`。
 
 ## 数据备份
 
