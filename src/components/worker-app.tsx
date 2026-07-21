@@ -29,6 +29,7 @@ import {
   LiveClock,
   LoadingScreen,
   RewardVisual,
+  TaskRewardOutcomeSummary,
   TaskRewardSummary,
   TimeCoin,
   Toast,
@@ -292,22 +293,27 @@ function WorkerHome({
 
       {recentResult && (
         <section className={`app-card p-4 ${recentResult.status === "approved" ? "bg-emerald-50" : recentResult.status === "revision_requested" ? "bg-amber-50" : "bg-red-50"}`}>
-          <div className="flex items-start gap-3">
-            {recentResult.status === "approved" ? <Sparkles className="shrink-0 text-emerald-600" /> : <Award className="shrink-0 text-amber-700" />}
-            <div><p className="font-black">{recentResult.title} · {statusInfo[recentResult.status].label}</p>{recentResult.reviewNote && <p className="mt-1 text-sm font-semibold text-slate-600">管理员说：{recentResult.reviewNote}</p>}</div>
-          </div>
-          {recentResult.status === "approved" && (
-            <div className="mt-3">
-              <TaskRewardSummary
-                baseRewardSeconds={recentResult.rewardSeconds}
-                excellentMultiplier={recentResult.excellentMultiplier}
-                bonusEnabled={recentResult.bonusEnabled}
-                items={recentResult.rewardItems}
-                showOutcomes
-                reviewTier={recentResult.reviewTier}
-              />
+          <div className="flex items-start justify-between gap-3">
+            <div className="flex min-w-0 items-start gap-3">
+              {recentResult.status === "approved" ? <Sparkles className="shrink-0 text-emerald-600" /> : <Award className="shrink-0 text-amber-700" />}
+              <div className="min-w-0">
+                <p className="font-black">{recentResult.title} · {statusInfo[recentResult.status].label}</p>
+                {recentResult.reviewTier === "excellent" && <span className="pill mt-1 bg-amber-100 text-amber-800"><Sparkles size={13} />优秀 ×{recentResult.reviewMultiplier}</span>}
+              </div>
             </div>
-          )}
+            {recentResult.status === "approved" && (
+              <div className="flex shrink-0 items-center gap-2 text-sm text-purple-700">
+                <TimeCoin seconds={Math.round(recentResult.rewardSeconds * (recentResult.reviewMultiplier || 1))} compact />
+                <TaskRewardOutcomeSummary
+                  baseRewardSeconds={recentResult.rewardSeconds}
+                  reviewMultiplier={recentResult.reviewMultiplier || 1}
+                  reviewTier={recentResult.reviewTier}
+                  reviewNote={recentResult.reviewNote}
+                  items={recentResult.rewardItems}
+                />
+              </div>
+            )}
+          </div>
         </section>
       )}
 
@@ -602,27 +608,23 @@ function TasksPanel({
                     <div className="flex flex-wrap items-center gap-2">
                       <h3 className="font-black">{assignment.title}</h3>
                       <span className={`pill ${statusInfo[assignment.status].className}`}>{statusInfo[assignment.status].label}</span>
+                      {assignment.reviewTier === "excellent" && <span className="pill bg-amber-100 text-amber-800"><Sparkles size={13} />优秀 ×{assignment.reviewMultiplier}</span>}
                     </div>
-                    {assignment.reviewNote && <p className="mt-1 text-sm font-semibold text-slate-600">管理员说：{assignment.reviewNote}</p>}
                   </div>
                   {assignment.status === "approved" && (
-                    <span className="shrink-0 text-sm text-purple-700">
+                    <div className="flex shrink-0 items-center gap-2 text-sm text-purple-700">
                       <TimeCoin seconds={Math.round(assignment.rewardSeconds * (assignment.reviewMultiplier || 1))} compact />
-                    </span>
+                      <TaskRewardOutcomeSummary
+                        baseRewardSeconds={assignment.rewardSeconds}
+                        reviewMultiplier={assignment.reviewMultiplier || 1}
+                        reviewTier={assignment.reviewTier}
+                        reviewNote={assignment.reviewNote}
+                        items={assignment.rewardItems}
+                      />
+                    </div>
                   )}
                 </div>
-                {assignment.status === "approved" ? (
-                  <div className="mt-3">
-                    <TaskRewardSummary
-                      baseRewardSeconds={assignment.rewardSeconds}
-                      excellentMultiplier={assignment.excellentMultiplier}
-                      bonusEnabled={assignment.bonusEnabled}
-                      items={assignment.rewardItems}
-                      showOutcomes
-                      reviewTier={assignment.reviewTier}
-                    />
-                  </div>
-                ) : (
+                {assignment.status !== "approved" && (
                   <p className="mt-3 rounded-xl bg-red-50 px-3 py-2 text-sm font-bold text-red-700">本次没有发放基础时数或奖励券。</p>
                 )}
               </article>

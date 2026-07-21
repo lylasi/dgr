@@ -167,7 +167,8 @@ button:disabled {
 }
 
 .page-enter {
-  animation: page-enter 220ms ease both;
+  /* Do not retain the final transform: transformed ancestors re-anchor fixed dialogs to long pages. */
+  animation: page-enter 220ms ease backwards;
 }
 
 .coin-pop {
