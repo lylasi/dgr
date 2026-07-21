@@ -25,12 +25,43 @@ import {
   updateWorker,
 } from "@/lib/service";
 import { getRequestSession, isAdminAuthorized } from "@/lib/session";
+import {
+  cancelRewardItem,
+  copyRewardDefinition,
+  createRewardDefinition,
+  grantRewardDefinition,
+  removeRewardDefinitionImage,
+  setRewardDefinitionActive,
+  setRewardDefinitionImage,
+  setRewardSystemEnabled,
+  updateDailyCouponSetting,
+  updateRewardDefinition,
+} from "@/lib/reward-service";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 const requestId = z.string().min(8).max(100).optional();
 const workerId = z.string().uuid();
+const rewardDefinitionId = z.string().uuid();
+const taskRewardBinding = z.object({
+  definitionId: rewardDefinitionId,
+  grantTier: z.enum(["normal", "excellent_bonus"]),
+  quantity: z.number().int().positive(),
+  probabilityPercent: z.number().int().min(0).max(100).default(100),
+});
+const rewardDefinitionFields = {
+  name: z.string().trim().min(1).max(60),
+  description: z.string().trim().max(600).default(""),
+  icon: z.enum(["gift", "sparkles", "clock", "book", "toy", "food", "trip"]),
+  theme: z.enum(["purple", "blue", "green", "orange", "pink"]),
+  kind: z.enum(["random_time", "fixed_time", "physical"]),
+  randomMinSeconds: z.number().int().min(60).max(86400).nullable().optional(),
+  randomMaxSeconds: z.number().int().min(60).max(86400).nullable().optional(),
+  fixedSeconds: z.number().int().min(60).max(86400).nullable().optional(),
+  physicalDescription: z.string().trim().max(600).nullable().optional(),
+  fulfillmentInstructions: z.string().trim().max(600).nullable().optional(),
+};
 
 const mutationSchema = z.discriminatedUnion("action", [
   z.object({
@@ -60,6 +91,51 @@ const mutationSchema = z.discriminatedUnion("action", [
     requestId,
   }),
   z.object({ action: z.literal("remove_worker_avatar"), workerId, requestId }),
+  z.object({ action: z.literal("create_reward_definition"), ...rewardDefinitionFields, requestId }),
+  z.object({
+    action: z.literal("update_reward_definition"),
+    definitionId: rewardDefinitionId,
+    ...rewardDefinitionFields,
+    requestId,
+  }),
+  z.object({ action: z.literal("copy_reward_definition"), definitionId: rewardDefinitionId, requestId }),
+  z.object({
+    action: z.literal("set_reward_definition_active"),
+    definitionId: rewardDefinitionId,
+    active: z.boolean(),
+    requestId,
+  }),
+  z.object({
+    action: z.literal("upload_reward_definition_image"),
+    definitionId: rewardDefinitionId,
+    imageDataUrl: z.string().min(32).max(750000),
+    requestId,
+  }),
+  z.object({ action: z.literal("remove_reward_definition_image"), definitionId: rewardDefinitionId, requestId }),
+  z.object({
+    action: z.literal("grant_reward_items"),
+    workerId,
+    definitionId: rewardDefinitionId,
+    quantity: z.number().int().positive(),
+    reason: z.string().trim().min(1).max(500),
+    requestId,
+  }),
+  z.object({
+    action: z.literal("cancel_reward_item"),
+    rewardItemId: z.string().uuid(),
+    reason: z.string().trim().min(1).max(500),
+    requestId,
+  }),
+  z.object({
+    action: z.literal("update_daily_coupon_setting"),
+    workerId,
+    isEnabled: z.boolean(),
+    dailyQuantity: z.number().int().nonnegative(),
+    randomMinSeconds: z.number().int().min(60).max(86400),
+    randomMaxSeconds: z.number().int().min(60).max(86400),
+    requestId,
+  }),
+  z.object({ action: z.literal("set_reward_system_enabled"), enabled: z.boolean(), requestId }),
   z.object({
     action: z.literal("create_task"),
     title: z.string().trim().min(1).max(60),
@@ -69,7 +145,9 @@ const mutationSchema = z.discriminatedUnion("action", [
     timingMode: z.enum(["none", "optional", "required"]),
     minimumDurationSeconds: z.number().int().min(0).max(86400).nullable().optional(),
     bonusEnabled: z.boolean(),
+    excellentMultiplier: z.number().min(1).default(2),
     bonusCriteria: z.string().trim().max(300).nullable().optional(),
+    rewardBindings: z.array(taskRewardBinding).default([]),
     dueAt: z.number().int().positive().nullable().optional(),
     assignNow: z.boolean().optional(),
     requestId,
@@ -79,7 +157,7 @@ const mutationSchema = z.discriminatedUnion("action", [
   z.object({
     action: z.literal("review"),
     assignmentId: z.string().uuid(),
-    decision: z.enum(["approve", "double", "revision", "reject"]),
+    decision: z.enum(["approve", "excellent", "double", "revision", "reject"]),
     note: z.string().trim().max(500).default(""),
     requestId,
   }),
@@ -187,6 +265,36 @@ export async function POST(request: NextRequest) {
         break;
       case "remove_worker_avatar":
         removeWorkerAvatarImage(input.workerId, input.requestId);
+        break;
+      case "create_reward_definition":
+        createRewardDefinition(input);
+        break;
+      case "update_reward_definition":
+        updateRewardDefinition(input);
+        break;
+      case "copy_reward_definition":
+        copyRewardDefinition(input.definitionId, input.requestId);
+        break;
+      case "set_reward_definition_active":
+        setRewardDefinitionActive(input.definitionId, input.active, input.requestId);
+        break;
+      case "upload_reward_definition_image":
+        setRewardDefinitionImage(input);
+        break;
+      case "remove_reward_definition_image":
+        removeRewardDefinitionImage(input.definitionId, input.requestId);
+        break;
+      case "grant_reward_items":
+        grantRewardDefinition(input);
+        break;
+      case "cancel_reward_item":
+        cancelRewardItem(input);
+        break;
+      case "update_daily_coupon_setting":
+        updateDailyCouponSetting(input);
+        break;
+      case "set_reward_system_enabled":
+        setRewardSystemEnabled(input.enabled, input.requestId);
         break;
       case "create_task":
         createTask(input);

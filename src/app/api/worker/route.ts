@@ -14,8 +14,11 @@ import {
   stopTimer,
   submitRewardRequest,
   submitAssignment,
+  syncWorker,
   workerAuthorizationValid,
 } from "@/lib/service";
+import { assertLoginAllowed, clearLoginFailures, recordLoginFailure } from "@/lib/rate-limit";
+import { confirmPhysicalReward, redeemTimeReward } from "@/lib/reward-service";
 import { getRequestSession } from "@/lib/session";
 
 export const runtime = "nodejs";
@@ -63,6 +66,13 @@ const mutationSchema = z.discriminatedUnion("action", [
     requestId,
   }),
   z.object({ action: z.literal("cancel_reward_request"), rewardRequestId: z.string().uuid(), requestId }),
+  z.object({ action: z.literal("redeem_reward_item"), rewardItemId: z.string().uuid(), requestId }),
+  z.object({
+    action: z.literal("confirm_physical_reward"),
+    rewardItemId: z.string().uuid(),
+    password: z.string().min(1).max(200),
+    requestId,
+  }),
 ]);
 
 function requireWorker(request: NextRequest) {
@@ -75,6 +85,11 @@ function requireWorker(request: NextRequest) {
     throw new AppError("登录已失效，请重新输入密码。", 401, "WORKER_LOGIN_REQUIRED");
   }
   return workerId;
+}
+
+function credentialAttemptKey(request: NextRequest, workerId: string) {
+  const forwarded = request.headers.get("x-forwarded-for")?.split(",")[0]?.trim();
+  return `${forwarded || "local"}:${workerId}`;
 }
 
 export async function GET(request: NextRequest) {
@@ -147,6 +162,23 @@ export async function POST(request: NextRequest) {
       case "cancel_reward_request":
         cancelRewardRequest({ ...input, workerId });
         break;
+      case "redeem_reward_item":
+        syncWorker(workerId);
+        redeemTimeReward({ ...input, workerId });
+        break;
+      case "confirm_physical_reward": {
+        const key = credentialAttemptKey(request, workerId);
+        assertLoginAllowed(key);
+        try {
+          syncWorker(workerId);
+          await confirmPhysicalReward({ ...input, workerId });
+          clearLoginFailures(key);
+        } catch (error) {
+          if (error instanceof AppError && error.code === "INVALID_PASSWORD") recordLoginFailure(key);
+          throw error;
+        }
+        break;
+      }
     }
     return jsonOk(getWorkerState(workerId));
   } catch (error) {

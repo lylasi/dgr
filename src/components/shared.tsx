@@ -23,7 +23,8 @@ import {
   Video,
 } from "lucide-react";
 import { useEffect, useState } from "react";
-import { formatClock, formatDuration } from "@/lib/time";
+import type { AssignmentRewardItem, TaskRewardBinding } from "@/components/types";
+import { formatClock, formatDuration, MINUTE } from "@/lib/time";
 
 export const THEME_COLORS: Record<string, { bg: string; ink: string; ring: string }> = {
   purple: { bg: "#eee9ff", ink: "#6246c7", ring: "#b8a6ff" },
@@ -72,6 +73,174 @@ export function Avatar({ avatar, theme, imageUrl, size = 54 }: { avatar: string;
       aria-hidden="true"
     >
       <Icon size={Math.round(size * 0.48)} strokeWidth={2.7} />
+    </div>
+  );
+}
+
+const rewardIcons: Record<string, LucideIcon> = {
+  gift: Gift,
+  sparkles: Sparkles,
+  clock: Clock3,
+  book: BookOpen,
+  toy: Gamepad2,
+  food: Award,
+  trip: Home,
+};
+
+export function rewardIcon(icon: string): LucideIcon {
+  return rewardIcons[icon] || Gift;
+}
+
+export function RewardVisual({
+  icon,
+  imageUrl,
+  theme = "purple",
+  size = 54,
+}: {
+  icon: string;
+  imageUrl?: string | null;
+  theme?: string;
+  size?: number;
+}) {
+  const [imageFailed, setImageFailed] = useState(false);
+  const Icon = rewardIcons[icon] || Gift;
+  const colors = THEME_COLORS[theme] || THEME_COLORS.purple;
+  useEffect(() => setImageFailed(false), [imageUrl]);
+  return (
+    <div
+      className="relative grid shrink-0 place-items-center overflow-hidden rounded-[20px] border-2"
+      style={{ width: size, height: size, background: colors.bg, color: colors.ink, borderColor: colors.ring }}
+    >
+      <Icon size={Math.round(size * 0.46)} strokeWidth={2.7} aria-hidden="true" />
+      {imageUrl && !imageFailed && (
+        <Image
+          src={imageUrl}
+          alt=""
+          width={size}
+          height={size}
+          className="absolute inset-0 h-full w-full object-cover"
+          unoptimized
+          onError={() => setImageFailed(true)}
+        />
+      )}
+    </div>
+  );
+}
+
+type TaskRewardDisplayItem = TaskRewardBinding | AssignmentRewardItem;
+
+function taskRewardValue(item: TaskRewardDisplayItem) {
+  if (item.kind === "random_time") {
+    return `${item.randomMinSeconds! / MINUTE}～${item.randomMaxSeconds! / MINUTE} 分钟随机时间`;
+  }
+  if (item.kind === "fixed_time") return `${item.fixedSeconds! / MINUTE} 分钟固定时间`;
+  return item.physicalDescription || "实物奖励";
+}
+
+export function TaskRewardList({
+  items,
+  showOutcomes = false,
+  emptyText = "未配置奖励券",
+}: {
+  items: TaskRewardDisplayItem[];
+  showOutcomes?: boolean;
+  emptyText?: string;
+}) {
+  if (items.length === 0) {
+    return <p className="rounded-xl bg-white/65 px-3 py-2 text-xs font-bold text-slate-500">{emptyText}</p>;
+  }
+  return (
+    <div className="space-y-2">
+      {items.map((item) => {
+        const awardedQuantity = "awardedQuantity" in item ? item.awardedQuantity : null;
+        return (
+          <div
+            key={`${item.grantTier}:${"bindingId" in item ? item.bindingId : item.id}`}
+            className="flex items-start gap-3 rounded-2xl bg-white/80 p-3"
+          >
+            <RewardVisual icon={item.icon} imageUrl={item.imageUrl} theme={item.theme} size={48} />
+            <div className="min-w-0 flex-1">
+              <div className="flex flex-wrap items-center gap-1.5">
+                <p className="font-black text-slate-800">{item.name}</p>
+                <span className="pill bg-purple-100 text-purple-700">× {item.quantity}</span>
+              </div>
+              <p className="mt-1 text-xs font-bold text-slate-600">{taskRewardValue(item)}</p>
+              <p className="mt-1 text-xs font-black text-purple-700">
+                {item.probabilityPercent === 100
+                  ? "100% 必得"
+                  : item.quantity > 1
+                    ? `每张独立 ${item.probabilityPercent}% 概率`
+                    : `${item.probabilityPercent}% 概率`}
+              </p>
+              {item.kind === "physical" && item.fulfillmentInstructions && (
+                <p className="mt-1 text-xs font-semibold leading-5 text-slate-500">交付：{item.fulfillmentInstructions}</p>
+              )}
+              {showOutcomes && awardedQuantity !== null && (
+                <p className={`mt-1 text-xs font-black ${awardedQuantity > 0 ? "text-emerald-700" : "text-slate-500"}`}>
+                  {awardedQuantity > 0 ? `本次实际获得 ${awardedQuantity} 张` : "本次概率未命中"}
+                </p>
+              )}
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+export function TaskRewardSummary({
+  baseRewardSeconds,
+  excellentMultiplier,
+  bonusEnabled,
+  items,
+  showOutcomes = false,
+  reviewTier = null,
+}: {
+  baseRewardSeconds: number;
+  excellentMultiplier: number;
+  bonusEnabled: boolean;
+  items: TaskRewardDisplayItem[];
+  showOutcomes?: boolean;
+  reviewTier?: "normal" | "excellent" | null;
+}) {
+  const normalItems = items.filter((item) => item.grantTier === "normal");
+  const excellentItems = items.filter((item) => item.grantTier === "excellent_bonus");
+  return (
+    <div className="space-y-3 rounded-2xl bg-slate-50 p-3">
+      <div className={`grid gap-2 ${bonusEnabled ? "grid-cols-2" : "grid-cols-1"}`}>
+        <div className="rounded-xl bg-blue-50 p-3">
+          <p className="text-[11px] font-black text-blue-600">正常完成 · 基础 ×1</p>
+          <p className="mt-1 text-sm text-purple-700"><TimeCoin seconds={baseRewardSeconds} compact /></p>
+          {reviewTier === "normal" && <p className="mt-1 text-[11px] font-black text-emerald-700">本次审核结果</p>}
+        </div>
+        {bonusEnabled && (
+          <div className="rounded-xl bg-amber-50 p-3">
+            <p className="text-[11px] font-black text-amber-700">优秀完成 · 基础 ×{excellentMultiplier}</p>
+            <p className="mt-1 text-sm text-purple-700">
+              <TimeCoin seconds={Math.round(baseRewardSeconds * excellentMultiplier)} compact />
+            </p>
+            {reviewTier === "excellent" && <p className="mt-1 text-[11px] font-black text-emerald-700">本次审核结果</p>}
+          </div>
+        )}
+      </div>
+      <div>
+        <div className="mb-2 flex flex-wrap items-baseline justify-between gap-1">
+          <p className="text-sm font-black text-slate-800">普通奖励券</p>
+          <p className="text-[11px] font-bold text-slate-500">正常、优秀都会参与</p>
+        </div>
+        <TaskRewardList items={normalItems} showOutcomes={showOutcomes} emptyText="没有普通奖励券" />
+      </div>
+      {bonusEnabled && (
+        <div>
+          <div className="mb-2 flex flex-wrap items-baseline justify-between gap-1">
+            <p className="text-sm font-black text-amber-900">优秀额外奖励券</p>
+            <p className="text-[11px] font-bold text-amber-700">
+              {reviewTier === "normal" ? "本次正常完成，未参与" : "仅优秀完成参与"}
+            </p>
+          </div>
+          <TaskRewardList items={excellentItems} showOutcomes={showOutcomes} emptyText="没有优秀额外奖励券" />
+        </div>
+      )}
     </div>
   );
 }
@@ -239,7 +408,7 @@ export const workerNavItems = [
   { id: "home" as const, label: "首页", icon: Home },
   { id: "tasks" as const, label: "打工", icon: ListChecks },
   { id: "running" as const, label: "进度", icon: Play },
-  { id: "rewards" as const, label: "奖励", icon: Gift, disabled: true, disabledLabel: "未开" },
+  { id: "rewards" as const, label: "奖励", icon: Gift },
   { id: "ledger" as const, label: "明细", icon: Award },
   { id: "me" as const, label: "我的", icon: UserRound },
 ];

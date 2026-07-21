@@ -26,6 +26,11 @@ import {
 import { FormEvent, useCallback, useEffect, useState, type ChangeEvent } from "react";
 import { api, mutationId } from "@/components/api";
 import {
+  DailyCouponControls,
+  DirectRewardDialog,
+  RewardSettingsPanel,
+} from "@/components/admin-rewards";
+import {
   activityIcon,
   adminNavItems,
   AppHeader,
@@ -36,11 +41,21 @@ import {
   EmptyState,
   LiveClock,
   LoadingScreen,
+  RewardVisual,
+  TaskRewardSummary,
   THEMES,
   TimeCoin,
   Toast,
 } from "@/components/shared";
-import type { AdminState, AdminWorker, Assignment, RewardRequest, Task } from "@/components/types";
+import type {
+  AdminState,
+  AdminWorker,
+  Assignment,
+  RewardDefinition,
+  RewardRequest,
+  Task,
+  TaskRewardBinding,
+} from "@/components/types";
 import { formatDateTime, formatDuration, HOUR, MINUTE } from "@/lib/time";
 
 type AdminTab = "home" | "publish" | "reviews" | "workers" | "settings";
@@ -53,6 +68,12 @@ const taskPresets = [
   { title: "编程", description: "完成今天的编程练习或小作品。", minutes: 45, icon: Settings2 },
   { title: "做家务", description: "认真完成一项家务。", minutes: 20, icon: CheckCircle2 },
 ];
+
+type TaskRewardDraft = {
+  definitionId: string;
+  quantity: number;
+  probabilityPercent: number;
+};
 
 const assignmentStatusLabels: Record<Assignment["status"], string> = {
   claimed: "已参加",
@@ -112,6 +133,7 @@ export function AdminApp({
   const [tab, setTab] = useState<AdminTab>("home");
   const [busy, setBusy] = useState(false);
   const [quickRewardWorkerId, setQuickRewardWorkerId] = useState<string | null>(null);
+  const [rewardWorkerId, setRewardWorkerId] = useState<string | null>(null);
   const [toast, setToast] = useState<{ message: string; tone: "success" | "error" } | null>(null);
 
   const load = useCallback(async (quiet = false) => {
@@ -181,7 +203,7 @@ export function AdminApp({
         {tab === "home" && <AdminHome state={state} setTab={setTab} mutate={mutate} busy={busy} onQuickReward={(workerId) => setQuickRewardWorkerId(workerId || "")} />}
         {tab === "publish" && <PublishPanel state={state} mutate={mutate} busy={busy} />}
         {tab === "reviews" && <ReviewPanel state={state} mutate={mutate} busy={busy} />}
-        {tab === "workers" && <WorkersPanel state={state} mutate={mutate} busy={busy} onQuickReward={setQuickRewardWorkerId} />}
+        {tab === "workers" && <WorkersPanel state={state} mutate={mutate} busy={busy} onQuickReward={setQuickRewardWorkerId} onDirectReward={setRewardWorkerId} />}
         {tab === "settings" && (
           <AdminSettings state={state} mutate={mutate} busy={busy} onSwitch={onSwitch} />
         )}
@@ -194,6 +216,15 @@ export function AdminApp({
           mutate={mutate}
           busy={busy}
           onClose={() => setQuickRewardWorkerId(null)}
+        />
+      )}
+      {rewardWorkerId !== null && (
+        <DirectRewardDialog
+          state={state}
+          initialWorkerId={rewardWorkerId}
+          mutate={mutate}
+          busy={busy}
+          onClose={() => setRewardWorkerId(null)}
         />
       )}
     </div>
@@ -335,6 +366,132 @@ function AdminHome({
   );
 }
 
+function TaskRewardBindingEditor({
+  title,
+  text,
+  definitions,
+  items,
+  onChange,
+  tone = "purple",
+}: {
+  title: string;
+  text: string;
+  definitions: RewardDefinition[];
+  items: TaskRewardDraft[];
+  onChange: (items: TaskRewardDraft[]) => void;
+  tone?: "purple" | "amber";
+}) {
+  const addDefinition = (definitionId: string) => {
+    if (!definitionId) return;
+    const existingIndex = items.findIndex((item) => item.definitionId === definitionId);
+    if (existingIndex >= 0) {
+      onChange(items.map((item, index) => index === existingIndex
+        ? { ...item, quantity: item.quantity + 1 }
+        : item));
+      return;
+    }
+    onChange([...items, { definitionId, quantity: 1, probabilityPercent: 100 }]);
+  };
+  const background = tone === "amber" ? "bg-amber-50" : "bg-purple-50";
+  const ink = tone === "amber" ? "text-amber-900" : "text-purple-900";
+  return (
+    <section className={`rounded-2xl p-4 ${background}`}>
+      <div>
+        <h3 className={`font-black ${ink}`}>{title}</h3>
+        <p className="mt-1 text-xs font-semibold leading-5 text-slate-600">{text}</p>
+      </div>
+      {definitions.length === 0 ? (
+        <p className="mt-3 rounded-xl bg-white/70 px-3 py-2 text-sm font-bold text-slate-500">请先到“设置 → 奖励设置”创建并启用奖励券模板。</p>
+      ) : (
+        <select
+          className="field mt-3"
+          value=""
+          onChange={(event) => addDefinition(event.target.value)}
+        >
+          <option value="">＋ 添加一种奖励券</option>
+          {definitions.map((definition) => (
+            <option key={definition.id} value={definition.id}>{definition.name}</option>
+          ))}
+        </select>
+      )}
+      {items.length === 0 ? (
+        <p className="mt-3 text-center text-xs font-bold text-slate-500">可以留空</p>
+      ) : (
+        <div className="mt-3 space-y-2">
+          {items.map((item) => {
+            const definition = definitions.find((candidate) => candidate.id === item.definitionId);
+            if (!definition) return null;
+            return (
+              <div key={item.definitionId} className="rounded-2xl bg-white p-3 shadow-sm">
+                <div className="flex items-start gap-3">
+                  <RewardVisual icon={definition.icon} imageUrl={definition.imageUrl} theme={definition.theme} size={48} />
+                  <div className="min-w-0 flex-1">
+                    <p className="font-black">{definition.name}</p>
+                    <p className="mt-1 text-xs font-semibold text-slate-500">
+                      {definition.kind === "random_time"
+                        ? `${definition.randomMinSeconds! / MINUTE}～${definition.randomMaxSeconds! / MINUTE} 分钟随机时间`
+                        : definition.kind === "fixed_time"
+                          ? `${definition.fixedSeconds! / MINUTE} 分钟固定时间`
+                          : definition.physicalDescription}
+                    </p>
+                    {definition.kind === "physical" && definition.fulfillmentInstructions && (
+                      <p className="mt-1 text-xs font-semibold text-slate-500">交付：{definition.fulfillmentInstructions}</p>
+                    )}
+                  </div>
+                  <button
+                    type="button"
+                    className="grid h-10 w-10 shrink-0 place-items-center rounded-xl text-red-500 hover:bg-red-50"
+                    aria-label={`删除 ${definition.name}`}
+                    onClick={() => onChange(items.filter((candidate) => candidate.definitionId !== item.definitionId))}
+                  >
+                    <XCircle size={20} />
+                  </button>
+                </div>
+                <div className="mt-3 grid grid-cols-2 gap-2">
+                  <label>
+                    <span className="label">数量（张）</span>
+                    <input
+                      className="field"
+                      type="number"
+                      inputMode="numeric"
+                      min={1}
+                      step={1}
+                      value={item.quantity}
+                      onChange={(event) => onChange(items.map((candidate) => candidate.definitionId === item.definitionId
+                        ? { ...candidate, quantity: Number(event.target.value) }
+                        : candidate))}
+                    />
+                  </label>
+                  <label>
+                    <span className="label">每张出现概率（%）</span>
+                    <input
+                      className="field"
+                      type="number"
+                      inputMode="numeric"
+                      min={0}
+                      max={100}
+                      step={1}
+                      value={item.probabilityPercent}
+                      onChange={(event) => onChange(items.map((candidate) => candidate.definitionId === item.definitionId
+                        ? { ...candidate, probabilityPercent: Number(event.target.value) }
+                        : candidate))}
+                    />
+                  </label>
+                </div>
+                <p className="mt-2 text-xs font-bold text-purple-700">
+                  {item.probabilityPercent === 100
+                    ? "100%：每张都一定获得"
+                    : `${item.quantity > 1 ? `${item.quantity} 张分别` : "这张"}独立判定 ${item.probabilityPercent}% 概率`}
+                </p>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </section>
+  );
+}
+
 function PublishPanel({
   state,
   mutate,
@@ -351,7 +508,10 @@ function PublishPanel({
   const [timingMode, setTimingMode] = useState<"none" | "optional" | "required">("optional");
   const [minimumMinutes, setMinimumMinutes] = useState("10");
   const [bonusEnabled, setBonusEnabled] = useState(false);
+  const [excellentMultiplier, setExcellentMultiplier] = useState("2");
   const [bonusCriteria, setBonusCriteria] = useState("");
+  const [normalRewards, setNormalRewards] = useState<TaskRewardDraft[]>([]);
+  const [excellentRewards, setExcellentRewards] = useState<TaskRewardDraft[]>([]);
   const [dueValue, setDueValue] = useState("");
   const [assignNow, setAssignNow] = useState(false);
   const [formError, setFormError] = useState("");
@@ -367,6 +527,7 @@ function PublishPanel({
     event.preventDefault();
     const rewardMinutesNumber = Number(rewardMinutes);
     const minimumMinutesNumber = Number(minimumMinutes);
+    const excellentMultiplierNumber = Number(excellentMultiplier);
     const dueAt = dueValue ? new Date(dueValue).getTime() : null;
     if (!Number.isInteger(rewardMinutesNumber) || rewardMinutesNumber < 1 || rewardMinutesNumber > 1440) {
       setFormError("基础奖励请填写 1～1440 的整数分钟。");
@@ -381,7 +542,20 @@ function PublishPanel({
       return;
     }
     if (bonusEnabled && !bonusCriteria.trim()) {
-      setFormError("请填写双倍奖励标准。");
+      setFormError("请填写优秀完成标准。");
+      return;
+    }
+    if (bonusEnabled && (!Number.isFinite(excellentMultiplierNumber) || excellentMultiplierNumber < 1)) {
+      setFormError("优秀完成的基础时数倍率必须大于或等于 1。");
+      return;
+    }
+    const allRewardDrafts = [...normalRewards, ...(bonusEnabled ? excellentRewards : [])];
+    if (allRewardDrafts.some((item) => !Number.isSafeInteger(item.quantity) || item.quantity < 1)) {
+      setFormError("每种奖励券的数量必须是正整数。");
+      return;
+    }
+    if (allRewardDrafts.some((item) => !Number.isInteger(item.probabilityPercent) || item.probabilityPercent < 0 || item.probabilityPercent > 100)) {
+      setFormError("奖励券出现概率必须是 0～100 的整数。");
       return;
     }
     setFormError("");
@@ -394,7 +568,14 @@ function PublishPanel({
       timingMode,
       minimumDurationSeconds: timingMode === "required" ? minimumMinutesNumber * MINUTE : null,
       bonusEnabled,
+      excellentMultiplier: bonusEnabled ? excellentMultiplierNumber : 2,
       bonusCriteria: bonusEnabled ? bonusCriteria : null,
+      rewardBindings: [
+        ...normalRewards.map((item) => ({ ...item, grantTier: "normal" as const })),
+        ...(bonusEnabled
+          ? excellentRewards.map((item) => ({ ...item, grantTier: "excellent_bonus" as const }))
+          : []),
+      ],
       dueAt,
       assignNow: Boolean(assignNow && targetWorkerId),
     }, "任务发布成功");
@@ -402,7 +583,10 @@ function PublishPanel({
       setTitle("");
       setDescription("");
       setBonusEnabled(false);
+      setExcellentMultiplier("2");
       setBonusCriteria("");
+      setNormalRewards([]);
+      setExcellentRewards([]);
       setAssignNow(false);
     }
   }
@@ -479,15 +663,68 @@ function PublishPanel({
           </label>
         </div>
         <label className="flex min-h-13 items-center gap-3 rounded-2xl bg-amber-50 px-4 py-3 font-black text-amber-900">
-          <input className="h-5 w-5 accent-purple-600" type="checkbox" checked={bonusEnabled} onChange={(event) => setBonusEnabled(event.target.checked)} />
-          优秀完成可以获得双倍奖励
+          <input
+            className="h-5 w-5 accent-purple-600"
+            type="checkbox"
+            checked={bonusEnabled}
+            onChange={(event) => {
+              setBonusEnabled(event.target.checked);
+              if (!event.target.checked) setExcellentRewards([]);
+            }}
+          />
+          开启优秀完成奖励
         </label>
         {bonusEnabled && (
-          <label>
-            <span className="label">双倍奖励标准</span>
-            <textarea className="field min-h-20" value={bonusCriteria} onChange={(event) => setBonusCriteria(event.target.value)} required placeholder="例如：能完整讲出故事内容并分享自己的想法" />
-          </label>
+          <div className="grid gap-3 sm:grid-cols-[160px_1fr]">
+            <label>
+              <span className="label">优秀基础时数倍率</span>
+              <div className="relative">
+                <span className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 font-black text-purple-700">×</span>
+                <input className="field !pl-8" type="number" inputMode="decimal" min={1} step={0.1} value={excellentMultiplier} onChange={(event) => setExcellentMultiplier(event.target.value)} />
+              </div>
+              <p className="mt-1 text-xs font-semibold text-slate-500">可填 ×1、×2、×3 或小数</p>
+            </label>
+            <label>
+              <span className="label">优秀完成标准</span>
+              <textarea className="field min-h-20" value={bonusCriteria} onChange={(event) => setBonusCriteria(event.target.value)} required placeholder="例如：能完整讲出故事内容并分享自己的想法" />
+            </label>
+          </div>
         )}
+        <TaskRewardBindingEditor
+          title="普通奖励券"
+          text="正常完成和优秀完成都会参与；每张券按自己的概率独立判定。"
+          definitions={state.rewardDefinitions.filter((definition) => definition.isActive)}
+          items={normalRewards}
+          onChange={setNormalRewards}
+        />
+        {bonusEnabled && (
+          <TaskRewardBindingEditor
+            title="优秀额外奖励券"
+            text="只有审核为优秀完成时参与，普通奖励券不会跟随基础时数倍率增加。"
+            definitions={state.rewardDefinitions.filter((definition) => definition.isActive)}
+            items={excellentRewards}
+            onChange={setExcellentRewards}
+            tone="amber"
+          />
+        )}
+        <div>
+          <p className="label">奖励预览</p>
+          <TaskRewardSummary
+            baseRewardSeconds={Number.isFinite(Number(rewardMinutes)) ? Number(rewardMinutes) * MINUTE : 0}
+            excellentMultiplier={bonusEnabled && Number.isFinite(Number(excellentMultiplier)) ? Number(excellentMultiplier) : 2}
+            bonusEnabled={bonusEnabled}
+            items={[
+              ...normalRewards.flatMap((item): TaskRewardBinding[] => {
+                const definition = state.rewardDefinitions.find((candidate) => candidate.id === item.definitionId);
+                return definition ? [{ ...definition, bindingId: `normal:${item.definitionId}`, definitionId: item.definitionId, grantTier: "normal", quantity: item.quantity, probabilityPercent: item.probabilityPercent }] : [];
+              }),
+              ...excellentRewards.flatMap((item): TaskRewardBinding[] => {
+                const definition = state.rewardDefinitions.find((candidate) => candidate.id === item.definitionId);
+                return definition ? [{ ...definition, bindingId: `excellent:${item.definitionId}`, definitionId: item.definitionId, grantTier: "excellent_bonus", quantity: item.quantity, probabilityPercent: item.probabilityPercent }] : [];
+              }),
+            ]}
+          />
+        </div>
         {formError && <p className="rounded-xl bg-red-50 px-3 py-2 text-sm font-bold text-red-700">{formError}</p>}
         {targetWorkerId && (
           <label className="flex items-center gap-3 rounded-2xl bg-blue-50 px-4 py-3 text-sm font-black text-blue-800">
@@ -495,7 +732,7 @@ function PublishPanel({
             发布后直接分配给这个打工人
           </label>
         )}
-        <button className="primary-button w-full" disabled={busy || !title.trim() || !Number.isInteger(Number(rewardMinutes)) || Number(rewardMinutes) < 1 || Number(rewardMinutes) > 1440 || (timingMode === "required" && (!Number.isInteger(Number(minimumMinutes)) || Number(minimumMinutes) < 1 || Number(minimumMinutes) > 1440)) || (bonusEnabled && !bonusCriteria.trim())}>
+        <button className="primary-button w-full" disabled={busy || !title.trim() || !Number.isInteger(Number(rewardMinutes)) || Number(rewardMinutes) < 1 || Number(rewardMinutes) > 1440 || (timingMode === "required" && (!Number.isInteger(Number(minimumMinutes)) || Number(minimumMinutes) < 1 || Number(minimumMinutes) > 1440)) || (bonusEnabled && (!bonusCriteria.trim() || !Number.isFinite(Number(excellentMultiplier)) || Number(excellentMultiplier) < 1))}>
           <Send className="mr-2 inline" size={19} /> {busy ? "正在发布…" : "发布任务"}
         </button>
       </form>
@@ -735,12 +972,20 @@ function TaskAdminCard({
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2">
             <h3 className="font-black">{task.title}</h3>
-            {task.bonusEnabled && <span className="pill bg-amber-100 text-amber-800">优秀 ×2</span>}
+            {task.bonusEnabled && <span className="pill bg-amber-100 text-amber-800">优秀 ×{task.excellentMultiplier}</span>}
             <span className={`pill ${task.status === "published" ? "bg-emerald-100 text-emerald-700" : "bg-slate-100 text-slate-500"}`}>{task.status === "published" ? "发布中" : "已关闭"}</span>
           </div>
           <p className="mt-1 text-sm font-semibold leading-6 text-slate-500">{task.description || "没有额外说明"}</p>
         </div>
         <div className="shrink-0 text-sm text-purple-700"><TimeCoin seconds={task.rewardSeconds} compact /></div>
+      </div>
+      <div className="mt-3">
+        <TaskRewardSummary
+          baseRewardSeconds={task.rewardSeconds}
+          excellentMultiplier={task.excellentMultiplier}
+          bonusEnabled={task.bonusEnabled}
+          items={task.rewardBindings}
+        />
       </div>
       <div className="mt-3 flex flex-wrap gap-2 text-xs font-bold text-slate-500">
         <span>已参加 {task.assignmentCount || 0}</span>
@@ -806,8 +1051,8 @@ function ReviewPanel({
             {[...state.reviews].sort((a, b) => (a.submittedAt || 0) - (b.submittedAt || 0)).map((assignment) => {
               const worker = state.workers.find((item) => item.id === assignment.workerId);
               const note = notes[assignment.id] || "";
-              const review = async (decision: "approve" | "double" | "revision" | "reject") => {
-                const ok = await mutate({ action: "review", assignmentId: assignment.id, decision, note }, decision === "double" ? "双倍奖励已入账" : decision === "approve" ? "奖励已入账" : "审核结果已发送");
+              const review = async (decision: "approve" | "excellent" | "revision" | "reject") => {
+                const ok = await mutate({ action: "review", assignmentId: assignment.id, decision, note }, decision === "excellent" ? "优秀完成奖励已结算" : decision === "approve" ? "正常完成奖励已结算" : "审核结果已发送");
                 if (ok) setNotes((value) => ({ ...value, [assignment.id]: "" }));
               };
               return (
@@ -830,8 +1075,8 @@ function ReviewPanel({
                         <p className="mt-1 font-black text-blue-900">{formatDuration(assignment.durationSeconds)}</p>
                       </div>
                       <div className="rounded-2xl bg-amber-50 p-3">
-                        <p className="text-xs font-bold text-amber-700">双倍规则</p>
-                        <p className="mt-1 text-sm font-black text-amber-900">{assignment.bonusEnabled ? "可以获得 ×2" : "本任务无双倍"}</p>
+                        <p className="text-xs font-bold text-amber-700">优秀规则</p>
+                        <p className="mt-1 text-sm font-black text-amber-900">{assignment.bonusEnabled ? `基础时数 ×${assignment.excellentMultiplier}` : "本任务未开启优秀完成"}</p>
                       </div>
                     </div>
                     <div className="flex gap-2 rounded-2xl bg-blue-50 p-3">
@@ -861,17 +1106,23 @@ function ReviewPanel({
                     </div>
                     {worker?.activeTimer && <p className="text-xs font-bold text-amber-700">该角色正在计时，结束计时后才能修正累计时长。</p>}
                     {assignment.bonusCriteria && <p className="rounded-xl bg-amber-50 px-3 py-2 text-sm font-bold text-amber-800">优秀标准：{assignment.bonusCriteria}</p>}
+                    <TaskRewardSummary
+                      baseRewardSeconds={assignment.rewardSeconds}
+                      excellentMultiplier={assignment.excellentMultiplier}
+                      bonusEnabled={assignment.bonusEnabled}
+                      items={assignment.rewardItems}
+                    />
                     <div className="rounded-2xl bg-slate-50 p-3">
                       <p className="text-xs font-bold text-slate-500">完成说明</p>
                       <p className="mt-1 font-semibold text-slate-700">{assignment.submissionNote || "没有填写"}</p>
                     </div>
                     <label>
-                      <span className="label">审核评语（双倍、退回或未通过时必填）</span>
+                      <span className="label">审核评语（优秀、退回或未通过时必填）</span>
                       <textarea className="field min-h-20" value={note} onChange={(event) => setNotes((value) => ({ ...value, [assignment.id]: event.target.value }))} placeholder="写一句鼓励或需要改进的地方" />
                     </label>
                     <div className="grid grid-cols-2 gap-2">
-                      <button className="success-button" disabled={busy} onClick={() => review("approve")}><CheckCircle2 className="mr-1 inline" size={18} />正常奖励</button>
-                      <button className="primary-button" disabled={busy || !assignment.bonusEnabled || !note.trim()} onClick={() => review("double")}><Sparkles className="mr-1 inline" size={18} />双倍奖励</button>
+                      <button className="success-button" disabled={busy} onClick={() => review("approve")}><CheckCircle2 className="mr-1 inline" size={18} />正常完成</button>
+                      <button className="primary-button" disabled={busy || !assignment.bonusEnabled || !note.trim()} onClick={() => review("excellent")}><Sparkles className="mr-1 inline" size={18} />优秀完成 ×{assignment.excellentMultiplier}</button>
                       <button className="secondary-button" disabled={busy || !note.trim()} onClick={() => review("revision")}><RefreshCw className="mr-1 inline" size={18} />退回完善</button>
                       <button className="danger-button" disabled={busy || !note.trim()} onClick={() => review("reject")}><XCircle className="mr-1 inline" size={18} />未通过</button>
                     </div>
@@ -958,11 +1209,13 @@ function WorkersPanel({
   mutate,
   busy,
   onQuickReward,
+  onDirectReward,
 }: {
   state: AdminState;
   mutate: (body: Record<string, unknown>, success: string) => Promise<boolean>;
   busy: boolean;
   onQuickReward: (workerId: string) => void;
+  onDirectReward: (workerId: string) => void;
 }) {
   const [name, setName] = useState("");
   const [pin, setPin] = useState("");
@@ -987,7 +1240,7 @@ function WorkersPanel({
         <SectionTitle title="角色管理" text="每日奖励修改后不会追溯当天已经发放的时数" />
         {state.workers.length === 0 ? <EmptyState title="还没有打工人" text="点击下方按钮创建第一个角色。" /> : (
           <div className="space-y-4">
-            {state.workers.map((worker) => <WorkerManageCard key={worker.id} worker={worker} state={state} mutate={mutate} busy={busy} onQuickReward={onQuickReward} />)}
+            {state.workers.map((worker) => <WorkerManageCard key={worker.id} worker={worker} state={state} mutate={mutate} busy={busy} onQuickReward={onQuickReward} onDirectReward={onDirectReward} />)}
           </div>
         )}
       </section>
@@ -1052,12 +1305,14 @@ function WorkerManageCard({
   mutate,
   busy,
   onQuickReward,
+  onDirectReward,
 }: {
   worker: AdminWorker;
   state: AdminState;
   mutate: (body: Record<string, unknown>, success: string) => Promise<boolean>;
   busy: boolean;
   onQuickReward: (workerId: string) => void;
+  onDirectReward: (workerId: string) => void;
 }) {
   const [pin, setPin] = useState("");
   const [adjustMinutes, setAdjustMinutes] = useState("");
@@ -1100,14 +1355,24 @@ function WorkerManageCard({
           <div className="mt-1 text-sm"><TimeCoin seconds={worker.balanceSeconds} compact /></div>
         </div>
         {worker.isActive && (
-          <button
-            type="button"
-            className="secondary-button shrink-0 !min-h-10 !px-3 text-sm"
-            disabled={busy}
-            onClick={() => onQuickReward(worker.id)}
-          >
-            <Gift className="mr-1 inline" size={17} />补录奖励
-          </button>
+          <div className="flex shrink-0 flex-col gap-1.5">
+            <button
+              type="button"
+              className="primary-button !min-h-10 !px-3 text-sm"
+              disabled={busy || !state.rewardSystemEnabled || state.rewardDefinitions.filter((item) => item.isActive).length === 0}
+              onClick={() => onDirectReward(worker.id)}
+            >
+              <Gift className="mr-1 inline" size={17} />发奖励券
+            </button>
+            <button
+              type="button"
+              className="secondary-button !min-h-10 !px-3 text-sm"
+              disabled={busy}
+              onClick={() => onQuickReward(worker.id)}
+            >
+              补录分钟
+            </button>
+          </div>
         )}
       </div>
 
@@ -1151,6 +1416,8 @@ function WorkerManageCard({
               <option value={0}>关闭</option><option value={30 * MINUTE}>30 分钟</option><option value={HOUR}>1 小时</option><option value={2 * HOUR}>2 小时</option><option value={3 * HOUR}>3 小时</option>
             </select>
           </label>
+
+          <DailyCouponControls worker={worker} mutate={mutate} busy={busy} />
 
           {worker.activeTimer ? (
             <div className="flex items-center justify-between gap-3 rounded-2xl bg-orange-50 p-3">
@@ -1346,6 +1613,10 @@ function AdminSettings({
 
   return (
     <div className="space-y-6">
+      <section>
+        <RewardSettingsPanel state={state} mutate={mutate} busy={busy} />
+      </section>
+
       <section>
         <SectionTitle title="消耗项目" text="打工人只能使用已启用的项目" />
         <div className="app-card p-4">

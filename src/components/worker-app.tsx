@@ -2,7 +2,9 @@
 
 import {
   Award,
+  CheckCircle2,
   Clock3,
+  Gift,
   ListChecks,
   LockKeyhole,
   Pause,
@@ -26,12 +28,14 @@ import {
   EmptyState,
   LiveClock,
   LoadingScreen,
+  RewardVisual,
+  TaskRewardSummary,
   TimeCoin,
   Toast,
   useLiveSeconds,
   workerNavItems,
 } from "@/components/shared";
-import type { Assignment, RewardRequest, Task, WorkerState } from "@/components/types";
+import type { Assignment, RewardItem, RewardRequest, Task, WorkerState } from "@/components/types";
 import { formatDateTime, formatDuration, MINUTE } from "@/lib/time";
 
 type WorkerTab = "home" | "tasks" | "running" | "rewards" | "ledger" | "me";
@@ -117,7 +121,32 @@ export function WorkerApp({
     }
   }
 
+  async function mutateReward(
+    body: Record<string, unknown>,
+    success: (nextState: WorkerState) => string,
+  ) {
+    setBusy(true);
+    try {
+      const data = await api<WorkerState>("/api/worker", {
+        method: "POST",
+        body: JSON.stringify({ ...body, requestId: body.requestId || mutationId() }),
+      });
+      setState(data);
+      setToast({ message: success(data), tone: "success" });
+      return data;
+    } catch (error) {
+      if (!onAuthorizationError(error)) setToast({ message: messageOf(error), tone: "error" });
+      return null;
+    } finally {
+      setBusy(false);
+    }
+  }
+
   if (!state) return <LoadingScreen />;
+
+  const nav = workerNavItems.map((item) => (
+    item.id === "rewards" ? { ...item, badge: state.availableRewardCount } : item
+  ));
 
   return (
     <div className={`min-h-screen ${state.activeTimer ? "pb-44" : "pb-28"}`}>
@@ -134,6 +163,7 @@ export function WorkerApp({
         {tab === "home" && <WorkerHome state={state} mutate={mutate} busy={busy} setTab={setTab} onOpenRewardRequest={() => setShowRewardRequest(true)} />}
         {tab === "tasks" && <TasksPanel state={state} mutate={mutate} busy={busy} onOpenRewardRequest={() => setShowRewardRequest(true)} />}
         {tab === "running" && <RunningPanel state={state} mutate={mutate} busy={busy} setTab={setTab} />}
+        {tab === "rewards" && <RewardsPanel state={state} mutateReward={mutateReward} busy={busy} />}
         {tab === "ledger" && <LedgerPanel state={state} />}
         {tab === "me" && <WorkerMe state={state} onSwitch={onSwitch} />}
       </main>
@@ -145,7 +175,7 @@ export function WorkerApp({
           cancelConsumption={() => mutate({ action: "cancel_consumption_timer" }, "误触计时已取消，本次没有扣款")}
         />
       )}
-      <BottomNav items={workerNavItems} active={tab} onChange={setTab} />
+      <BottomNav items={nav} active={tab} onChange={setTab} />
       {showRewardRequest && (
         <RewardRequestDialog
           state={state}
@@ -266,6 +296,18 @@ function WorkerHome({
             {recentResult.status === "approved" ? <Sparkles className="shrink-0 text-emerald-600" /> : <Award className="shrink-0 text-amber-700" />}
             <div><p className="font-black">{recentResult.title} · {statusInfo[recentResult.status].label}</p>{recentResult.reviewNote && <p className="mt-1 text-sm font-semibold text-slate-600">管理员说：{recentResult.reviewNote}</p>}</div>
           </div>
+          {recentResult.status === "approved" && (
+            <div className="mt-3">
+              <TaskRewardSummary
+                baseRewardSeconds={recentResult.rewardSeconds}
+                excellentMultiplier={recentResult.excellentMultiplier}
+                bonusEnabled={recentResult.bonusEnabled}
+                items={recentResult.rewardItems}
+                showOutcomes
+                reviewTier={recentResult.reviewTier}
+              />
+            </div>
+          )}
         </section>
       )}
 
@@ -512,6 +554,10 @@ function TasksPanel({
   onOpenRewardRequest: () => void;
 }) {
   const activeAssignments = state.assignments.filter((assignment) => !["approved", "rejected", "cancelled"].includes(assignment.status));
+  const recentAssignments = state.assignments
+    .filter((assignment) => ["approved", "rejected"].includes(assignment.status))
+    .sort((left, right) => (right.reviewedAt || right.submittedAt || 0) - (left.reviewedAt || left.submittedAt || 0))
+    .slice(0, 10);
   const pendingRequests = state.rewardRequests.filter((request) => ["pending", "revision_requested"].includes(request.status)).length;
   return (
     <div className="space-y-6">
@@ -544,6 +590,46 @@ function TasksPanel({
           <div className="space-y-4">{activeAssignments.map((assignment) => <AssignmentCard key={assignment.id} assignment={assignment} activeTimer={state.activeTimer} mutate={mutate} busy={busy} />)}</div>
         )}
       </section>
+      {recentAssignments.length > 0 && (
+        <section>
+          <h2 className="text-xl font-black">最近任务结果</h2>
+          <p className="mb-3 mt-0.5 text-sm font-semibold text-slate-500">这里会显示实际到账的基础时数和奖励券</p>
+          <div className="space-y-3">
+            {recentAssignments.map((assignment) => (
+              <article key={assignment.id} className={`app-card p-4 ${assignment.status === "approved" ? "border-emerald-200" : "border-red-100"}`}>
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <h3 className="font-black">{assignment.title}</h3>
+                      <span className={`pill ${statusInfo[assignment.status].className}`}>{statusInfo[assignment.status].label}</span>
+                    </div>
+                    {assignment.reviewNote && <p className="mt-1 text-sm font-semibold text-slate-600">管理员说：{assignment.reviewNote}</p>}
+                  </div>
+                  {assignment.status === "approved" && (
+                    <span className="shrink-0 text-sm text-purple-700">
+                      <TimeCoin seconds={Math.round(assignment.rewardSeconds * (assignment.reviewMultiplier || 1))} compact />
+                    </span>
+                  )}
+                </div>
+                {assignment.status === "approved" ? (
+                  <div className="mt-3">
+                    <TaskRewardSummary
+                      baseRewardSeconds={assignment.rewardSeconds}
+                      excellentMultiplier={assignment.excellentMultiplier}
+                      bonusEnabled={assignment.bonusEnabled}
+                      items={assignment.rewardItems}
+                      showOutcomes
+                      reviewTier={assignment.reviewTier}
+                    />
+                  </div>
+                ) : (
+                  <p className="mt-3 rounded-xl bg-red-50 px-3 py-2 text-sm font-bold text-red-700">本次没有发放基础时数或奖励券。</p>
+                )}
+              </article>
+            ))}
+          </div>
+        </section>
+      )}
     </div>
   );
 }
@@ -552,10 +638,18 @@ function AvailableTaskCard({ task, busy, claim }: { task: Task; busy: boolean; c
   return (
     <div className="app-card p-4">
       <div className="flex items-start justify-between gap-3">
-        <div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><h3 className="font-black">{task.title}</h3>{task.bonusEnabled && <span className="pill bg-amber-100 text-amber-800"><Sparkles size={14} />优秀 ×2</span>}</div><p className="mt-1 text-sm font-semibold leading-6 text-slate-500">{task.description || "完成这个任务后提交管理员审核"}</p></div>
+        <div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><h3 className="font-black">{task.title}</h3>{task.bonusEnabled && <span className="pill bg-amber-100 text-amber-800"><Sparkles size={14} />优秀 ×{task.excellentMultiplier}</span>}</div><p className="mt-1 text-sm font-semibold leading-6 text-slate-500">{task.description || "完成这个任务后提交管理员审核"}</p></div>
         <div className="shrink-0 text-sm text-purple-700"><TimeCoin seconds={task.rewardSeconds} compact /></div>
       </div>
-      {task.bonusCriteria && <p className="mt-3 rounded-xl bg-amber-50 px-3 py-2 text-sm font-bold text-amber-800">双倍标准：{task.bonusCriteria}</p>}
+      {task.bonusCriteria && <p className="mt-3 rounded-xl bg-amber-50 px-3 py-2 text-sm font-bold text-amber-800">优秀标准：{task.bonusCriteria}</p>}
+      <div className="mt-3">
+        <TaskRewardSummary
+          baseRewardSeconds={task.rewardSeconds}
+          excellentMultiplier={task.excellentMultiplier}
+          bonusEnabled={task.bonusEnabled}
+          items={task.rewardBindings}
+        />
+      </div>
       <div className="mt-3 flex items-center justify-between gap-3"><span className="text-xs font-bold text-slate-500">{task.timingMode === "required" ? `需计时至少 ${formatDuration(task.minimumDurationSeconds || 0, false)}` : task.timingMode === "optional" ? "可以记录计时" : "不需要计时"}{task.dueAt ? ` · ${formatDateTime(task.dueAt)} 截止` : ""}</span><button className="primary-button shrink-0 !min-h-11 !px-4" disabled={busy} onClick={claim}>参加</button></div>
     </div>
   );
@@ -595,8 +689,14 @@ function AssignmentCard({
               {remainingRequirementSeconds > 0 ? `还需 ${formatDuration(remainingRequirementSeconds)}` : "已达到计时要求"}
             </span>
           )}
-          {assignment.bonusEnabled && <span className="pill bg-amber-100 text-amber-800"><Sparkles size={14} />优秀可得 {formatDuration(assignment.rewardSeconds * 2, false)}</span>}
+          {assignment.bonusEnabled && <span className="pill bg-amber-100 text-amber-800"><Sparkles size={14} />优秀 ×{assignment.excellentMultiplier} 可得 {formatDuration(Math.round(assignment.rewardSeconds * assignment.excellentMultiplier), false)}</span>}
         </div>
+        <TaskRewardSummary
+          baseRewardSeconds={assignment.rewardSeconds}
+          excellentMultiplier={assignment.excellentMultiplier}
+          bonusEnabled={assignment.bonusEnabled}
+          items={assignment.rewardItems}
+        />
         {assignment.dueAt && <p className="text-xs font-bold text-slate-500">截止时间：{formatDateTime(assignment.dueAt)}</p>}
         {assignment.status === "revision_requested" && assignment.reviewNote && <p className="rounded-xl bg-amber-50 px-3 py-2 text-sm font-bold text-amber-800">管理员说：{assignment.reviewNote}</p>}
         {canWork && (
@@ -711,6 +811,14 @@ function RunningPanel({ state, mutate, busy, setTab }: { state: WorkerState; mut
               </p>
               {activeAssignment.description && <p className="mt-2 text-sm font-semibold leading-6 text-slate-600">任务说明：{activeAssignment.description}</p>}
               {activeAssignment.dueAt && <p className="mt-2 text-xs font-bold text-slate-500">截止时间：{formatDateTime(activeAssignment.dueAt)}</p>}
+              <div className="mt-3">
+                <TaskRewardSummary
+                  baseRewardSeconds={activeAssignment.rewardSeconds}
+                  excellentMultiplier={activeAssignment.excellentMultiplier}
+                  bonusEnabled={activeAssignment.bonusEnabled}
+                  items={activeAssignment.rewardItems}
+                />
+              </div>
             </div>
           )}
 
@@ -766,6 +874,284 @@ function RunningPanel({ state, mutate, busy, setTab }: { state: WorkerState; mut
           </div>
         )}
       </section>
+    </div>
+  );
+}
+
+const rewardSourceLabels: Record<RewardItem["sourceType"], string> = {
+  daily: "每日免费派发",
+  task: "任务奖励",
+  admin_direct: "管理员直接发放",
+  achievement: "成就奖励",
+  adjustment: "补发或纠错",
+};
+
+const rewardStatusLabels: Record<RewardItem["status"], string> = {
+  available: "可使用",
+  redeemed: "已使用",
+  fulfilled: "已收到",
+  cancelled: "已撤销",
+  expired: "已过期",
+};
+
+function groupAvailableRewards(items: RewardItem[]) {
+  const groups = new Map<string, { item: RewardItem; items: RewardItem[] }>();
+  for (const item of items.filter((reward) => reward.status === "available")) {
+    const key = item.definitionId
+      ? `${item.definitionId}:${item.definitionVersion}`
+      : `${item.kind}:${item.name}:${item.randomMinSeconds}:${item.randomMaxSeconds}:${item.fixedSeconds}:${item.imageUrl || ""}`;
+    const group = groups.get(key);
+    if (group) group.items.push(item);
+    else groups.set(key, { item, items: [item] });
+  }
+  return [...groups.values()];
+}
+
+function rewardValueText(item: RewardItem) {
+  if (item.kind === "random_time") {
+    return `${item.randomMinSeconds! / MINUTE}～${item.randomMaxSeconds! / MINUTE} 分钟随机时间`;
+  }
+  if (item.kind === "fixed_time") return `${item.fixedSeconds! / MINUTE} 分钟固定时间`;
+  return item.physicalDescription || "明确的实物奖励";
+}
+
+function RewardsPanel({
+  state,
+  mutateReward,
+  busy,
+}: {
+  state: WorkerState;
+  mutateReward: (
+    body: Record<string, unknown>,
+    success: (nextState: WorkerState) => string,
+  ) => Promise<WorkerState | null>;
+  busy: boolean;
+}) {
+  const [confirmPhysical, setConfirmPhysical] = useState<RewardItem | null>(null);
+  const [lastResult, setLastResult] = useState<{ name: string; seconds: number } | null>(null);
+  const availableGroups = useMemo(() => groupAvailableRewards(state.rewardItems), [state.rewardItems]);
+  const timeGroups = availableGroups.filter((group) => group.item.kind !== "physical");
+  const physicalGroups = availableGroups.filter((group) => group.item.kind === "physical");
+  const history = useMemo(() => [...state.rewardItems]
+    .sort((left, right) => Math.max(
+      right.usedAt || 0,
+      right.cancelledAt || 0,
+      right.grantedAt,
+    ) - Math.max(left.usedAt || 0, left.cancelledAt || 0, left.grantedAt))
+    .slice(0, 30), [state.rewardItems]);
+  const todayGrant = state.todayDailyCouponGrant;
+
+  async function redeemReward(item: RewardItem) {
+    if (item.kind === "fixed_time" && !window.confirm(`确定使用“${item.name}”吗？将立即增加 ${item.fixedSeconds! / MINUTE} 分钟。`)) {
+      return;
+    }
+    const next = await mutateReward(
+      { action: "redeem_reward_item", rewardItemId: item.id },
+      (nextState) => {
+        const used = nextState.rewardItems.find((reward) => reward.id === item.id);
+        return used?.resultSeconds
+          ? `获得 ${used.resultSeconds / MINUTE} 分钟时间币！`
+          : "奖励券已使用";
+      },
+    );
+    const used = next?.rewardItems.find((reward) => reward.id === item.id);
+    if (used?.resultSeconds) setLastResult({ name: used.name, seconds: used.resultSeconds });
+  }
+
+  return (
+    <div className="space-y-6">
+      {!state.rewardSystemEnabled && (
+        <section className="app-card border-amber-200 bg-amber-50 p-4 text-center">
+          <p className="font-black text-amber-800">奖励系统暂时休息中</p>
+          <p className="mt-1 text-sm font-semibold text-amber-700">已有奖励券会安全保留，恢复后可以继续使用。</p>
+        </section>
+      )}
+
+      {todayGrant && todayGrant.actualQuantity > 0 && (
+        <section className="app-card purple-gradient-card overflow-hidden p-5 text-white sm:p-6">
+          <div className="flex items-center gap-4">
+            <div className="grid h-16 w-16 shrink-0 place-items-center rounded-3xl bg-white/20"><Gift size={34} strokeWidth={2.8} /></div>
+            <div>
+              <p className="text-sm font-black text-purple-100">今日派发</p>
+              <h2 className="mt-1 text-2xl font-black">收到 {todayGrant.actualQuantity} 张随机时间券</h2>
+              <p className="mt-1 text-sm font-bold text-purple-100">
+                每张 {todayGrant.randomMinSeconds / MINUTE}～{todayGrant.randomMaxSeconds / MINUTE} 分钟 · 永久有效
+              </p>
+            </div>
+          </div>
+        </section>
+      )}
+
+      {lastResult && (
+        <section className="app-card page-enter border-emerald-200 bg-emerald-50 p-5 text-center">
+          <Sparkles className="mx-auto text-emerald-600" size={36} />
+          <p className="mt-2 text-sm font-black text-emerald-700">{lastResult.name}</p>
+          <p className="mt-1 text-3xl font-black text-emerald-700">+{lastResult.seconds / MINUTE} 分钟</p>
+          <button className="secondary-button mt-3 !min-h-10 text-sm" onClick={() => setLastResult(null)}>知道啦</button>
+        </section>
+      )}
+
+      <section>
+        <div className="mb-3">
+          <h2 className="text-xl font-black">我的时间券</h2>
+          <p className="mt-0.5 text-sm font-semibold text-slate-500">随机券和固定券都由你选择什么时候使用</p>
+        </div>
+        {timeGroups.length === 0 ? (
+          <EmptyState title="还没有时间券" text="每日派发或管理员发放的时间券会出现在这里。" />
+        ) : (
+          <div className="space-y-3">
+            {timeGroups.map(({ item, items }) => {
+              const average = item.kind === "random_time"
+                ? (item.randomMinSeconds! + item.randomMaxSeconds!) / (2 * MINUTE)
+                : null;
+              return (
+                <article className="app-card p-4" key={`${item.id}:${items.length}`}>
+                  <div className="flex items-start gap-3">
+                    <RewardVisual icon={item.icon} theme={item.theme} size={56} />
+                    <div className="min-w-0 flex-1">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <h3 className="font-black">{item.name}</h3>
+                        <span className="pill bg-purple-100 text-purple-700">× {items.length}</span>
+                      </div>
+                      <p className="mt-1 text-sm font-black text-purple-700">{rewardValueText(item)}</p>
+                      {average !== null && <p className="mt-1 text-xs font-semibold text-slate-500">平均 {average} 分钟，每个整数分钟机会相同</p>}
+                      <p className="mt-1 text-xs font-bold text-slate-500">有效期：永久 · {rewardSourceLabels[item.sourceType]}</p>
+                    </div>
+                  </div>
+                  {item.description && <p className="mt-3 rounded-2xl bg-slate-50 px-3 py-2 text-sm font-semibold leading-6 text-slate-600">{item.description}</p>}
+                  <button
+                    className="primary-button mt-3 w-full"
+                    disabled={busy || !state.rewardSystemEnabled}
+                    onClick={() => void redeemReward(items[0])}
+                  >
+                    {item.kind === "random_time" ? <><Sparkles className="mr-1 inline" size={18} />打开惊喜</> : <><Clock3 className="mr-1 inline" size={18} />使用整张券</>}
+                  </button>
+                </article>
+              );
+            })}
+          </div>
+        )}
+      </section>
+
+      <section>
+        <div className="mb-3">
+          <h2 className="text-xl font-black">待领取实物</h2>
+          <p className="mt-0.5 text-sm font-semibold text-slate-500">实际收到后，再用自己的当前密码确认</p>
+        </div>
+        {physicalGroups.length === 0 ? (
+          <div className="soft-card p-4 text-center text-sm font-bold text-slate-500">现在没有待确认的实物券</div>
+        ) : (
+          <div className="space-y-3">
+            {physicalGroups.map(({ item, items }) => (
+              <article className="app-card p-4" key={`${item.id}:${items.length}`}>
+                <div className="flex items-start gap-3">
+                  <RewardVisual icon={item.icon} imageUrl={item.imageUrl} theme={item.theme} size={72} />
+                  <div className="min-w-0 flex-1">
+                    <div className="flex flex-wrap items-center gap-2"><h3 className="font-black">{item.name}</h3>{items.length > 1 && <span className="pill bg-emerald-100 text-emerald-700">× {items.length}</span>}</div>
+                    <p className="mt-1 text-sm font-semibold leading-6 text-slate-700">{item.physicalDescription}</p>
+                    <p className="mt-1 text-xs font-bold text-slate-500">有效期：永久</p>
+                  </div>
+                </div>
+                <div className="mt-3 rounded-2xl bg-blue-50 px-3 py-2 text-sm font-semibold leading-6 text-blue-900">
+                  交付说明：{item.fulfillmentInstructions}
+                </div>
+                <button
+                  className="success-button mt-3 w-full"
+                  disabled={busy || !state.rewardSystemEnabled}
+                  onClick={() => setConfirmPhysical(items[0])}
+                ><CheckCircle2 className="mr-1 inline" size={18} />确认收到</button>
+              </article>
+            ))}
+          </div>
+        )}
+      </section>
+
+      <section>
+        <div className="mb-3">
+          <h2 className="text-xl font-black">最近奖励记录</h2>
+          <p className="mt-0.5 text-sm font-semibold text-slate-500">发放、使用结果和实物确认都会保留</p>
+        </div>
+        {history.length === 0 ? (
+          <div className="soft-card p-4 text-center text-sm font-bold text-slate-500">还没有奖励记录</div>
+        ) : (
+          <div className="app-card divide-y divide-purple-50 overflow-hidden">
+            {history.map((item) => (
+              <div className="flex items-center gap-3 p-4" key={item.id}>
+                <RewardVisual icon={item.icon} imageUrl={item.imageUrl} theme={item.theme} size={44} />
+                <div className="min-w-0 flex-1">
+                  <div className="flex flex-wrap items-center gap-2"><p className="truncate text-sm font-black">{item.name}</p><span className={`pill ${item.status === "available" ? "bg-blue-100 text-blue-700" : item.status === "cancelled" ? "bg-slate-100 text-slate-500" : "bg-emerald-100 text-emerald-700"}`}>{rewardStatusLabels[item.status]}</span></div>
+                  <p className="mt-1 text-xs font-semibold text-slate-500">{rewardSourceLabels[item.sourceType]} · {formatDateTime(item.usedAt || item.cancelledAt || item.grantedAt, state.worker.timezone)}</p>
+                  {item.resultSeconds && <p className="mt-1 text-xs font-black text-emerald-700">实际获得 {item.resultSeconds / MINUTE} 分钟</p>}
+                  {item.cancellationReason && <p className="mt-1 text-xs font-semibold text-slate-500">原因：{item.cancellationReason}</p>}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </section>
+
+      {confirmPhysical && (
+        <PhysicalRewardConfirmDialog
+          item={confirmPhysical}
+          busy={busy}
+          onClose={() => setConfirmPhysical(null)}
+          onConfirm={async (password) => {
+            const next = await mutateReward(
+              { action: "confirm_physical_reward", rewardItemId: confirmPhysical.id, password },
+              () => "已确认收到实物，记录保存成功",
+            );
+            if (next) setConfirmPhysical(null);
+            return Boolean(next);
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+function PhysicalRewardConfirmDialog({
+  item,
+  busy,
+  onClose,
+  onConfirm,
+}: {
+  item: RewardItem;
+  busy: boolean;
+  onClose: () => void;
+  onConfirm: (password: string) => Promise<boolean>;
+}) {
+  const [password, setPassword] = useState("");
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && !busy) onClose();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [busy, onClose]);
+
+  return (
+    <div className="fixed inset-0 z-[70] flex items-end justify-center bg-slate-900/45 p-3 sm:items-center sm:p-6" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !busy) onClose(); }}>
+      <form
+        className="page-enter w-full max-w-md rounded-[28px] bg-white p-5 shadow-2xl sm:p-6"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="physical-confirm-title"
+        onSubmit={async (event) => { event.preventDefault(); await onConfirm(password); }}
+      >
+        <div className="flex items-center gap-3">
+          <RewardVisual icon={item.icon} imageUrl={item.imageUrl} theme={item.theme} size={64} />
+          <div><h2 id="physical-confirm-title" className="text-xl font-black">确认已经收到</h2><p className="mt-1 text-sm font-semibold text-slate-500">{item.name}</p></div>
+        </div>
+        <p className="mt-4 rounded-2xl bg-amber-50 px-4 py-3 text-sm font-bold leading-6 text-amber-800">请在实际收到实物之后操作。输入你自己的当前密码或 PIN，系统不会保存输入内容。</p>
+        <label className="mt-4 block">
+          <span className="label">当前密码或 PIN</span>
+          <input className="field" type="password" autoComplete="current-password" value={password} onChange={(event) => setPassword(event.target.value)} autoFocus required maxLength={200} />
+        </label>
+        <div className="mt-5 grid grid-cols-2 gap-2">
+          <button type="button" className="secondary-button" disabled={busy} onClick={onClose}>先不确认</button>
+          <button className="success-button" disabled={busy || !password}>{busy ? "正在确认…" : "确认收到"}</button>
+        </div>
+      </form>
     </div>
   );
 }

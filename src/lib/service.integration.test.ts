@@ -29,7 +29,23 @@ import {
   syncWorker,
   updateWorker,
 } from "@/lib/service";
-import { HOUR } from "@/lib/time";
+import {
+  cancelRewardItem,
+  confirmPhysicalReward,
+  copyRewardDefinition,
+  createRewardDefinition,
+  getAdminRewardState,
+  getRewardDefinitionImage,
+  grantRewardDefinition,
+  redeemTimeReward,
+  removeRewardDefinitionImage,
+  setRewardDefinitionActive,
+  setRewardDefinitionImage,
+  setRewardSystemEnabled,
+  updateDailyCouponSetting,
+  updateRewardDefinition,
+} from "@/lib/reward-service";
+import { HOUR, MINUTE } from "@/lib/time";
 
 const databasePath = path.join("/private/tmp", `pen-worker-test-${process.pid}.db`);
 
@@ -492,6 +508,223 @@ describe.sequential("SQLite business flow", () => {
     })).toMatchObject({ duplicated: true });
     state = getWorkerState(featureWorkerId);
     expect(state.worker.balanceSeconds).toBe(115 * 60);
+  });
+
+  it("supports the complete first-stage reward coupon lifecycle", async () => {
+    const randomDefinitionId = createRewardDefinition({
+      name: "周末惊喜券",
+      description: "使用时随机获得时间币",
+      icon: "sparkles",
+      theme: "purple",
+      kind: "random_time",
+      randomMinSeconds: 5 * MINUTE,
+      randomMaxSeconds: 7 * MINUTE,
+      requestId: "reward-create-random",
+    });
+    expect(createRewardDefinition({
+      name: "不会重复创建",
+      icon: "sparkles",
+      theme: "purple",
+      kind: "random_time",
+      randomMinSeconds: MINUTE,
+      randomMaxSeconds: MINUTE,
+      requestId: "reward-create-random",
+    })).toBe(randomDefinitionId);
+
+    const fixedDefinitionId = createRewardDefinition({
+      name: "30 分钟时间券",
+      description: "想用的时候再用",
+      icon: "clock",
+      theme: "blue",
+      kind: "fixed_time",
+      fixedSeconds: 30 * MINUTE,
+      requestId: "reward-create-fixed",
+    });
+    const physicalDefinitionId = createRewardDefinition({
+      name: "新图书券",
+      description: "一起挑一本喜欢的书",
+      icon: "book",
+      theme: "green",
+      kind: "physical",
+      physicalDescription: "一本 30 元以内的新图书",
+      fulfillmentInstructions: "周末一起去书店购买",
+      requestId: "reward-create-physical",
+    });
+    const tinyPng = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl2nO0AAAAASUVORK5CYII=";
+    const physicalImageUrl = setRewardDefinitionImage({
+      definitionId: physicalDefinitionId,
+      imageDataUrl: tinyPng,
+      requestId: "reward-physical-image",
+    });
+    const physicalImageId = physicalImageUrl!.split("/").at(-1)!;
+    expect(getRewardDefinitionImage(physicalImageId)?.mime_type).toBe("image/png");
+
+    const fixedGrant = grantRewardDefinition({
+      workerId: featureWorkerId,
+      definitionId: fixedDefinitionId,
+      quantity: 2,
+      reason: "认真完成整理",
+      requestId: "reward-grant-fixed",
+    });
+    expect(fixedGrant.rewardItemIds).toHaveLength(2);
+    expect(grantRewardDefinition({
+      workerId: featureWorkerId,
+      definitionId: fixedDefinitionId,
+      quantity: 2,
+      reason: "网络重试",
+      requestId: "reward-grant-fixed",
+    })).toMatchObject({ duplicated: true, batchId: fixedGrant.batchId });
+
+    updateRewardDefinition({
+      definitionId: fixedDefinitionId,
+      name: "45 分钟时间券",
+      description: "模板已经修改",
+      icon: "clock",
+      theme: "blue",
+      kind: "fixed_time",
+      fixedSeconds: 45 * MINUTE,
+      requestId: "reward-update-fixed",
+    });
+    let state = getWorkerState(featureWorkerId);
+    const issuedFixed = state.rewardItems.filter((item) => fixedGrant.rewardItemIds.includes(item.id));
+    expect(issuedFixed).toHaveLength(2);
+    expect(issuedFixed.every((item) => item.fixedSeconds === 30 * MINUTE && item.name === "30 分钟时间券")).toBe(true);
+
+    const balanceBeforeFixed = state.worker.balanceSeconds;
+    const fixedUse = redeemTimeReward({
+      workerId: featureWorkerId,
+      rewardItemId: fixedGrant.rewardItemIds[0],
+      requestId: "reward-use-fixed",
+    });
+    expect(fixedUse.resultSeconds).toBe(30 * MINUTE);
+    expect(redeemTimeReward({
+      workerId: featureWorkerId,
+      rewardItemId: fixedGrant.rewardItemIds[0],
+      requestId: "reward-use-fixed",
+    })).toMatchObject({ duplicated: true, resultSeconds: 30 * MINUTE });
+    expect(() => redeemTimeReward({
+      workerId: featureWorkerId,
+      rewardItemId: fixedGrant.rewardItemIds[0],
+      requestId: "reward-use-fixed-again",
+    })).toThrow(/已经处理过/);
+    state = getWorkerState(featureWorkerId);
+    expect(state.worker.balanceSeconds).toBe(balanceBeforeFixed + 30 * MINUTE);
+    expect(state.transactions.find((transaction) => transaction.id === fixedUse.transactionId)?.type).toBe("coupon_reward");
+
+    const randomGrant = grantRewardDefinition({
+      workerId: featureWorkerId,
+      definitionId: randomDefinitionId,
+      quantity: 1,
+      reason: "周末惊喜",
+      requestId: "reward-grant-random",
+    });
+    const randomUse = redeemTimeReward({
+      workerId: featureWorkerId,
+      rewardItemId: randomGrant.rewardItemIds[0],
+      requestId: "reward-use-random",
+    });
+    expect(randomUse.resultSeconds).toBeGreaterThanOrEqual(5 * MINUTE);
+    expect(randomUse.resultSeconds).toBeLessThanOrEqual(7 * MINUTE);
+    expect(randomUse.resultSeconds % MINUTE).toBe(0);
+
+    const physicalGrant = grantRewardDefinition({
+      workerId: featureWorkerId,
+      definitionId: physicalDefinitionId,
+      quantity: 1,
+      reason: "读书表现优秀",
+      requestId: "reward-grant-physical",
+    });
+    removeRewardDefinitionImage(physicalDefinitionId, "reward-remove-physical-image");
+    state = getWorkerState(featureWorkerId);
+    expect(state.rewardItems.find((item) => item.id === physicalGrant.rewardItemIds[0])?.imageUrl).toBe(physicalImageUrl);
+    await expect(confirmPhysicalReward({
+      workerId: featureWorkerId,
+      rewardItemId: physicalGrant.rewardItemIds[0],
+      password: "错误密码",
+      requestId: "reward-confirm-physical-wrong",
+    })).rejects.toThrow(/密码不正确/);
+    expect(getWorkerState(featureWorkerId).rewardItems.find((item) => item.id === physicalGrant.rewardItemIds[0])?.status).toBe("available");
+    const physicalUse = await confirmPhysicalReward({
+      workerId: featureWorkerId,
+      rewardItemId: physicalGrant.rewardItemIds[0],
+      password: "5678",
+      requestId: "reward-confirm-physical",
+    });
+    expect(physicalUse.duplicated).toBe(false);
+    expect(await confirmPhysicalReward({
+      workerId: featureWorkerId,
+      rewardItemId: physicalGrant.rewardItemIds[0],
+      password: "5678",
+      requestId: "reward-confirm-physical",
+    })).toMatchObject({ duplicated: true });
+    expect(getWorkerState(featureWorkerId).rewardItems.find((item) => item.id === physicalGrant.rewardItemIds[0])?.status).toBe("fulfilled");
+
+    updateDailyCouponSetting({
+      workerId: featureWorkerId,
+      isEnabled: true,
+      dailyQuantity: 2,
+      randomMinSeconds: 2 * MINUTE,
+      randomMaxSeconds: 4 * MINUTE,
+      requestId: "reward-enable-daily",
+    });
+    const dailyBefore = getWorkerState(featureWorkerId).rewardItems.filter((item) => item.sourceType === "daily").length;
+    const tomorrow = Date.now() + 26 * HOUR * 1000;
+    syncWorker(featureWorkerId, tomorrow);
+    syncWorker(featureWorkerId, tomorrow);
+    const dailyItems = getWorkerState(featureWorkerId).rewardItems.filter((item) => item.sourceType === "daily");
+    expect(dailyItems).toHaveLength(dailyBefore + 2);
+    expect(dailyItems.slice(0, 2).every((item) => item.randomMinSeconds === 2 * MINUTE && item.randomMaxSeconds === 4 * MINUTE)).toBe(true);
+
+    setRewardSystemEnabled(false, "reward-system-off");
+    expect(() => grantRewardDefinition({
+      workerId: featureWorkerId,
+      definitionId: fixedDefinitionId,
+      quantity: 1,
+      reason: "系统暂停测试",
+      requestId: "reward-grant-while-off",
+    })).toThrow(/暂停/);
+    expect(() => redeemTimeReward({
+      workerId: featureWorkerId,
+      rewardItemId: fixedGrant.rewardItemIds[1],
+      requestId: "reward-use-while-off",
+    })).toThrow(/暂停/);
+    expect(getWorkerState(featureWorkerId).rewardItems.find((item) => item.id === fixedGrant.rewardItemIds[1])?.status).toBe("available");
+    setRewardSystemEnabled(true, "reward-system-on");
+
+    cancelRewardItem({
+      rewardItemId: fixedGrant.rewardItemIds[1],
+      reason: "管理员确认误发",
+      requestId: "reward-cancel-fixed",
+    });
+    expect(cancelRewardItem({
+      rewardItemId: fixedGrant.rewardItemIds[1],
+      reason: "网络重试",
+      requestId: "reward-cancel-fixed",
+    })).toMatchObject({ duplicated: true });
+    expect(() => cancelRewardItem({
+      rewardItemId: fixedGrant.rewardItemIds[0],
+      reason: "不能撤销已使用券",
+      requestId: "reward-cancel-used-fixed",
+    })).toThrow(/尚未使用/);
+
+    const copiedDefinitionId = copyRewardDefinition(physicalDefinitionId, "reward-copy-physical");
+    expect(getAdminRewardState().rewardDefinitions.find((item) => item.id === copiedDefinitionId)).toMatchObject({
+      kind: "physical",
+      isActive: true,
+      imageUrl: null,
+    });
+    setRewardDefinitionActive(randomDefinitionId, false, "reward-disable-random");
+    expect(() => grantRewardDefinition({
+      workerId: featureWorkerId,
+      definitionId: randomDefinitionId,
+      quantity: 1,
+      reason: "停用模板测试",
+      requestId: "reward-grant-disabled",
+    })).toThrow(/已经停用/);
+
+    const rewardAdminState = getAdminRewardState();
+    expect(rewardAdminState.rewardItems.some((item) => item.workerName === "功能测试员")).toBe(true);
+    expect(rewardAdminState.rewardDefinitions).toHaveLength(4);
   });
 
   it("returns a complete administrator dashboard", () => {

@@ -12,6 +12,17 @@ import {
 } from "@/lib/db";
 import { AppError } from "@/lib/http";
 import { hashPassword, verifyPassword } from "@/lib/password";
+import {
+  getPublicAssignmentRewardItems,
+  getPublicTaskRewardBindings,
+  getAdminRewardState,
+  getWorkerRewardState,
+  grantAssignmentRewardsWithin,
+  grantDailyCouponsWithin,
+  replaceTaskRewardBindingsWithin,
+  snapshotAssignmentRewardsWithin,
+  type TaskRewardBindingInput,
+} from "@/lib/reward-service";
 import { dateKey, elapsedSeconds } from "@/lib/time";
 
 type Db = Database.Database;
@@ -30,12 +41,13 @@ type ConsumptionRow = {
 type TransactionRow = {
   id: string;
   worker_id: string;
-  type: "daily_reward" | "task_reward" | "consumption" | "admin_adjustment";
+  type: "daily_reward" | "task_reward" | "consumption" | "admin_adjustment" | "coupon_reward";
   title: string;
   amount_seconds: number;
   balance_after_seconds: number;
   assignment_id: string | null;
   consumption_activity_id: string | null;
+  reward_item_id: string | null;
   actor: Actor;
   reason: string | null;
   request_id: string | null;
@@ -290,11 +302,12 @@ function grantDailyReward(db: Db, workerId: string, now: number) {
 function syncWorkerWithin(db: Db, workerId: string, now = Date.now()) {
   reconcileExpiredConsumption(db, workerId, now);
   grantDailyReward(db, workerId, now);
+  grantDailyCouponsWithin(db, workerId, now);
 }
 
 export function syncWorker(workerId: string, now = Date.now()) {
   const db = getDb();
-  return db.transaction(() => syncWorkerWithin(db, workerId, now))();
+  return db.transaction(() => syncWorkerWithin(db, workerId, now)).immediate();
 }
 
 function workerAvatarUrl(db: Db, workerId: string): string | null {
@@ -319,7 +332,7 @@ function publicWorker(db: Db, worker: WorkerRow) {
   };
 }
 
-function publicTask(task: TaskRow) {
+function publicTask(db: Db, task: TaskRow) {
   return {
     id: task.id,
     title: task.title,
@@ -329,11 +342,13 @@ function publicTask(task: TaskRow) {
     timingMode: task.timing_mode,
     minimumDurationSeconds: task.minimum_duration_seconds,
     bonusEnabled: Boolean(task.bonus_enabled),
+    excellentMultiplier: task.excellent_multiplier_bps / 10_000,
     bonusCriteria: task.bonus_criteria,
     availableFrom: task.available_from,
     dueAt: task.due_at,
     status: task.status,
     createdAt: task.created_at,
+    rewardBindings: getPublicTaskRewardBindings(db, task.id),
   };
 }
 
@@ -361,16 +376,19 @@ function publicAssignment(db: Db, assignment: AssignmentRow) {
     timingMode: assignment.timing_mode,
     minimumDurationSeconds: assignment.minimum_duration_seconds,
     bonusEnabled: Boolean(assignment.bonus_enabled),
+    excellentMultiplier: assignment.excellent_multiplier_bps / 10_000,
     bonusCriteria: assignment.bonus_criteria,
     dueAt: assignment.due_at,
     status: assignment.status,
     submissionNote: assignment.submission_note,
     reviewMultiplier: assignment.review_multiplier,
+    reviewTier: assignment.review_tier,
     reviewNote: assignment.review_note,
     reviewedAt: assignment.reviewed_at,
     claimedAt: assignment.claimed_at,
     submittedAt: assignment.submitted_at,
     durationSeconds: assignmentDuration(db, assignment.id),
+    rewardItems: getPublicAssignmentRewardItems(db, assignment.id),
   };
 }
 
@@ -424,6 +442,7 @@ function publicTransaction(row: TransactionRow, workerName?: string) {
     balanceAfterSeconds: row.balance_after_seconds,
     actor: row.actor,
     reason: row.reason,
+    rewardItemId: row.reward_item_id,
     startedAt: row.started_at,
     endedAt: row.ended_at,
     createdAt: row.created_at,
@@ -561,6 +580,11 @@ export async function createWorker(input: {
       now,
       now,
     );
+    db.prepare(`
+      INSERT INTO worker_daily_coupon_settings(
+        worker_id, is_enabled, daily_quantity, random_min_seconds, random_max_seconds, updated_at
+      ) VALUES (?, 0, 0, 300, 900, ?)
+    `).run(id, now);
     audit(db, "admin", "worker_created", "worker", id, `创建打工人：${input.name.trim()}`, mutationId);
   })();
   return id;
@@ -648,9 +672,11 @@ function createAssignmentWithin(db: Db, task: TaskRow, workerId: string, assigne
       UPDATE task_assignments SET
         title_snapshot = ?, description_snapshot = ?, reward_seconds = ?,
         timing_mode = ?, minimum_duration_seconds = ?, bonus_enabled = ?,
-        bonus_criteria = ?, due_at = ?, status = 'claimed', submission_note = NULL,
-        review_multiplier = NULL, review_note = NULL, reviewed_at = NULL,
-        approved_transaction_id = NULL, assigned_by = ?, claimed_at = ?,
+        excellent_multiplier_bps = ?, bonus_criteria = ?, due_at = ?,
+        status = 'claimed', submission_note = NULL,
+        review_multiplier = NULL, review_tier = NULL, review_note = NULL, reviewed_at = NULL,
+        approved_transaction_id = NULL, approved_reward_grant_id = NULL,
+        assigned_by = ?, claimed_at = ?,
         submitted_at = NULL, updated_at = ?, version = version + 1
       WHERE id = ?
     `).run(
@@ -660,6 +686,7 @@ function createAssignmentWithin(db: Db, task: TaskRow, workerId: string, assigne
       task.timing_mode,
       task.minimum_duration_seconds,
       task.bonus_enabled,
+      task.excellent_multiplier_bps,
       task.bonus_criteria,
       task.due_at,
       assignedBy,
@@ -667,6 +694,7 @@ function createAssignmentWithin(db: Db, task: TaskRow, workerId: string, assigne
       now,
       previous.id,
     );
+    snapshotAssignmentRewardsWithin(db, previous.id, task.id, now);
     return previous.id;
   }
 
@@ -676,8 +704,9 @@ function createAssignmentWithin(db: Db, task: TaskRow, workerId: string, assigne
       INSERT INTO task_assignments(
         id, task_id, worker_id, title_snapshot, description_snapshot,
         reward_seconds, timing_mode, minimum_duration_seconds, bonus_enabled,
-        bonus_criteria, due_at, assigned_by, claimed_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        excellent_multiplier_bps, bonus_criteria, due_at, assigned_by,
+        claimed_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       id,
       task.id,
@@ -688,6 +717,7 @@ function createAssignmentWithin(db: Db, task: TaskRow, workerId: string, assigne
       task.timing_mode,
       task.minimum_duration_seconds,
       task.bonus_enabled,
+      task.excellent_multiplier_bps,
       task.bonus_criteria,
       task.due_at,
       assignedBy,
@@ -700,6 +730,7 @@ function createAssignmentWithin(db: Db, task: TaskRow, workerId: string, assigne
     }
     throw error;
   }
+  snapshotAssignmentRewardsWithin(db, id, task.id, now);
   return id;
 }
 
@@ -711,7 +742,9 @@ export function createTask(input: {
   timingMode: TaskRow["timing_mode"];
   minimumDurationSeconds?: number | null;
   bonusEnabled: boolean;
+  excellentMultiplier?: number;
   bonusCriteria?: string | null;
+  rewardBindings?: TaskRewardBindingInput[];
   dueAt?: number | null;
   assignNow?: boolean;
   requestId?: string;
@@ -720,6 +753,10 @@ export function createTask(input: {
   const id = uniqueId();
   const now = Date.now();
   const mutationId = requestId(input.requestId);
+  const excellentMultiplierBps = Math.round((input.excellentMultiplier ?? 2) * 10_000);
+  if (!Number.isSafeInteger(excellentMultiplierBps) || excellentMultiplierBps < 10_000) {
+    throw new AppError("优秀完成倍率必须是大于或等于 1 的有效数字。", 400, "INVALID_EXCELLENT_MULTIPLIER");
+  }
   return db.transaction(() => {
     const previous = db
       .prepare("SELECT target_id FROM audit_logs WHERE request_id = ?")
@@ -729,9 +766,10 @@ export function createTask(input: {
     db.prepare(`
       INSERT INTO tasks(
         id, title, description, reward_seconds, target_worker_id,
-        timing_mode, minimum_duration_seconds, bonus_enabled, bonus_criteria,
+        timing_mode, minimum_duration_seconds, bonus_enabled,
+        excellent_multiplier_bps, bonus_criteria,
         due_at, status, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'published', ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'published', ?, ?)
     `).run(
       id,
       input.title.trim(),
@@ -741,9 +779,17 @@ export function createTask(input: {
       input.timingMode,
       input.minimumDurationSeconds || null,
       input.bonusEnabled ? 1 : 0,
+      excellentMultiplierBps,
       input.bonusEnabled ? input.bonusCriteria?.trim() || null : null,
       input.dueAt || null,
       now,
+      now,
+    );
+    replaceTaskRewardBindingsWithin(
+      db,
+      id,
+      input.rewardBindings || [],
+      input.bonusEnabled,
       now,
     );
     if (input.assignNow && input.targetWorkerId) {
@@ -751,7 +797,7 @@ export function createTask(input: {
     }
     audit(db, "admin", "task_published", "task", id, `发布任务：${input.title.trim()}`, mutationId);
     return id;
-  })();
+  }).immediate();
 }
 
 export function submitRewardRequest(input: {
@@ -1361,7 +1407,7 @@ export function submitAssignment(input: {
 
 export function reviewAssignment(input: {
   assignmentId: string;
-  decision: "approve" | "double" | "revision" | "reject";
+  decision: "approve" | "excellent" | "double" | "revision" | "reject";
   note: string;
   requestId?: string;
 }) {
@@ -1375,8 +1421,9 @@ export function reviewAssignment(input: {
     if (assignment.status !== "submitted") {
       throw new AppError("这个任务已经被处理，或还没有提交。", 409, "ALREADY_REVIEWED");
     }
-    if (input.decision === "double" && !assignment.bonus_enabled) {
-      throw new AppError("这个任务没有开启双倍奖励。", 409, "BONUS_NOT_ALLOWED");
+    const excellent = input.decision === "excellent" || input.decision === "double";
+    if (excellent && !assignment.bonus_enabled) {
+      throw new AppError("这个任务没有开启优秀奖励。", 409, "BONUS_NOT_ALLOWED");
     }
     if (input.decision !== "approve" && !input.note.trim()) {
       throw new AppError("请写一句审核说明。", 400, "REVIEW_NOTE_REQUIRED");
@@ -1401,9 +1448,16 @@ export function reviewAssignment(input: {
 
     syncWorkerWithin(db, assignment.worker_id, now);
     const worker = getWorkerRow(db, assignment.worker_id);
-    const multiplier = input.decision === "double" ? 2 : 1;
-    const amount = assignment.reward_seconds * multiplier;
+    const multiplierBps = excellent ? assignment.excellent_multiplier_bps : 10_000;
+    const multiplier = multiplierBps / 10_000;
+    const amount = Math.round(assignment.reward_seconds * multiplierBps / 10_000);
+    if (!Number.isSafeInteger(amount) || amount <= 0) {
+      throw new AppError("任务奖励时数超出可处理范围。", 400, "INVALID_REWARD_AMOUNT");
+    }
     const nextBalance = worker.balance_seconds + amount;
+    if (!Number.isSafeInteger(nextBalance)) {
+      throw new AppError("打工人的时数余额超出可处理范围。", 409, "BALANCE_TOO_LARGE");
+    }
     const transactionId = uniqueId();
     db.prepare("UPDATE workers SET balance_seconds = ?, updated_at = ? WHERE id = ?")
       .run(nextBalance, now, worker.id);
@@ -1416,19 +1470,50 @@ export function reviewAssignment(input: {
       balanceAfter: nextBalance,
       assignmentId: assignment.id,
       actor: "admin",
-      reason: input.note.trim() || (multiplier === 2 ? "优秀完成，获得双倍奖励" : "审核通过"),
+      reason: input.note.trim() || (excellent ? `优秀完成，基础时数 ×${multiplier}` : "审核通过"),
       requestId: mutationId,
       createdAt: now,
     });
+    const rewardGrant = grantAssignmentRewardsWithin(db, {
+      assignmentId: assignment.id,
+      workerId: worker.id,
+      excellent,
+      reviewNote: input.note.trim(),
+      requestId: mutationId,
+      now,
+    });
     db.prepare(`
       UPDATE task_assignments SET
-        status = 'approved', review_multiplier = ?, review_note = ?, reviewed_at = ?,
-        approved_transaction_id = ?, updated_at = ?, version = version + 1
+        status = 'approved', review_multiplier = ?, review_tier = ?, review_note = ?, reviewed_at = ?,
+        approved_transaction_id = ?, approved_reward_grant_id = ?,
+        updated_at = ?, version = version + 1
       WHERE id = ?
-    `).run(multiplier, input.note.trim() || "审核通过", now, transactionId, now, assignment.id);
-    audit(db, "admin", multiplier === 2 ? "review_double" : "review_approved", "assignment", assignment.id, input.note.trim());
-    return { duplicated: false, amountSeconds: amount };
-  })();
+    `).run(
+      multiplier,
+      excellent ? "excellent" : "normal",
+      input.note.trim() || "审核通过",
+      now,
+      transactionId,
+      rewardGrant.batchId,
+      now,
+      assignment.id,
+    );
+    audit(
+      db,
+      "admin",
+      excellent ? "review_excellent" : "review_approved",
+      "assignment",
+      assignment.id,
+      input.note.trim(),
+      mutationId,
+    );
+    return {
+      duplicated: false,
+      amountSeconds: amount,
+      configuredRewardCount: rewardGrant.configuredQuantity,
+      awardedRewardCount: rewardGrant.awardedQuantity,
+    };
+  }).immediate();
 }
 
 export function grantQuickReward(input: {
@@ -1573,7 +1658,7 @@ export function getWorkerState(workerId: string) {
         WHERE a.task_id = t.id AND a.worker_id = ? AND a.status <> 'cancelled'
       )
     ORDER BY t.created_at DESC
-  `).all(workerId, now, now, workerId) as TaskRow[]).map(publicTask);
+  `).all(workerId, now, now, workerId) as TaskRow[]).map((row) => publicTask(db, row));
   const assignments = (db
     .prepare("SELECT * FROM task_assignments WHERE worker_id = ? ORDER BY updated_at DESC")
     .all(workerId) as AssignmentRow[]).map((row) => publicAssignment(db, row));
@@ -1607,6 +1692,7 @@ export function getWorkerState(workerId: string) {
   const dailyGrant = db
     .prepare("SELECT amount_seconds FROM daily_grants WHERE worker_id = ? AND reward_date = ?")
     .get(workerId, today) as { amount_seconds: number } | undefined;
+  const rewardState = getWorkerRewardState(workerId, now);
 
   return {
     worker: publicWorker(db, getWorkerRow(db, workerId)),
@@ -1616,6 +1702,7 @@ export function getWorkerState(workerId: string) {
     activeTimer: publicTimer(db, activeTimer),
     activities,
     transactions,
+    ...rewardState,
     summary: {
       todayIncomeSeconds: todayTransactions
         .filter((row) => row.amountSeconds > 0)
@@ -1655,7 +1742,7 @@ export function getAdminState() {
   const tasks = (db
     .prepare("SELECT * FROM tasks ORDER BY created_at DESC")
     .all() as TaskRow[]).map((row) => ({
-    ...publicTask(row),
+    ...publicTask(db, row),
     assignmentCount: assignmentRows.filter((assignment) => assignment.task_id === row.id && assignment.status !== "cancelled").length,
     assignedWorkerIds: assignmentRows
       .filter((assignment) => assignment.task_id === row.id && assignment.status !== "cancelled")
@@ -1671,6 +1758,7 @@ export function getAdminState() {
     FROM transactions tr JOIN workers w ON w.id = tr.worker_id
     ORDER BY tr.created_at DESC LIMIT 80
   `).all() as Array<TransactionRow & { worker_name: string }>;
+  const rewardState = getAdminRewardState();
 
   return {
     workers: refreshedWorkers.map((worker) => {
@@ -1683,6 +1771,11 @@ export function getAdminState() {
         pendingReviewCount:
           workerAssignments.filter((assignment) => assignment.status === "submitted").length
           + rewardRequests.filter((rewardRequest) => rewardRequest.workerId === worker.id).length,
+        dailyCouponSetting: rewardState.dailyCouponSettings.find((setting) => setting.workerId === worker.id)!,
+        todayDailyCouponGrant: rewardState.todayDailyCouponGrants[worker.id] || null,
+        availableRewardCount: rewardState.rewardItems.filter(
+          (item) => item.workerId === worker.id && item.status === "available",
+        ).length,
       };
     }),
     tasks,
@@ -1690,5 +1783,6 @@ export function getAdminState() {
     rewardRequests,
     activities,
     transactions: transactionRows.map((row) => publicTransaction(row, row.worker_name)),
+    ...rewardState,
   };
 }
