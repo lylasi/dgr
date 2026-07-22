@@ -5,6 +5,7 @@ import {
   Award,
   BookOpen,
   CheckCircle2,
+  ChevronRight,
   Clock3,
   CircleHelp,
   Gift,
@@ -19,6 +20,8 @@ import {
   Settings2,
   ShieldCheck,
   Sparkles,
+  TrendingDown,
+  TrendingUp,
   UserPlus,
   UsersRound,
   XCircle,
@@ -26,6 +29,7 @@ import {
 import { FormEvent, useCallback, useEffect, useState, type ChangeEvent } from "react";
 import { api, mutationId } from "@/components/api";
 import {
+  AdminRewardHistoryPanel,
   DailyCouponControls,
   DirectRewardDialog,
   RewardSettingsPanel,
@@ -55,6 +59,7 @@ import type {
   RewardRequest,
   Task,
   TaskRewardBinding,
+  Transaction,
 } from "@/components/types";
 import { formatDateTime, formatDuration, HOUR, MINUTE } from "@/lib/time";
 
@@ -1305,7 +1310,7 @@ function TaskAdminCard({
   );
 }
 
-function ReviewPanel({
+export function ReviewPanel({
   state,
   mutate,
   busy,
@@ -1316,11 +1321,18 @@ function ReviewPanel({
 }) {
   const [notes, setNotes] = useState<Record<string, string>>({});
   const [durationMinutes, setDurationMinutes] = useState<Record<string, string>>({});
-  if (state.reviews.length === 0 && state.rewardRequests.length === 0) {
-    return <EmptyState title="全部审核完啦" text="任务提交或自主奖励申报会出现在这里。" />;
-  }
+  const hasPendingReviews = state.reviews.length > 0 || state.rewardRequests.length > 0;
   return (
-    <div className="space-y-7">
+    <div className="space-y-6">
+      {!hasPendingReviews && (
+        <section>
+          <SectionTitle title="待审核" text="任务提交或自主奖励申报会出现在这里" />
+          <div className="app-card flex items-center gap-3 p-3">
+            <div className="grid h-10 w-10 shrink-0 place-items-center rounded-2xl bg-emerald-100 text-emerald-700"><CheckCircle2 size={21} /></div>
+            <div><p className="text-sm font-black">全部审核完啦</p><p className="mt-0.5 text-xs font-semibold text-slate-500">下面可以继续查看历史记录</p></div>
+          </div>
+        </section>
+      )}
       {state.rewardRequests.length > 0 && (
         <section>
           <SectionTitle title="自主申报奖励" text="打工人自己填写的任务，只有通过后才会发放" />
@@ -1439,6 +1451,9 @@ function ReviewPanel({
           </div>
         </section>
       )}
+
+      <AdminRewardHistoryPanel state={state} mutate={mutate} busy={busy} />
+      <AdminTransactionHistory state={state} mutate={mutate} busy={busy} />
     </div>
   );
 }
@@ -1886,6 +1901,142 @@ function AdminAssignmentControls({
   );
 }
 
+const transactionTypeLabels: Record<Transaction["type"], string> = {
+  daily_reward: "每日奖励",
+  task_reward: "任务奖励",
+  consumption: "时间消耗",
+  admin_adjustment: "余额调整",
+  coupon_reward: "奖励券入账",
+};
+
+export function AdminTransactionHistory({
+  state,
+  mutate,
+  busy,
+}: {
+  state: AdminState;
+  mutate: (body: Record<string, unknown>, success: string) => Promise<boolean>;
+  busy: boolean;
+}) {
+  const [selectedItemId, setSelectedItemId] = useState<string | null>(null);
+  const selectedItem = selectedItemId ? state.transactions.find((item) => item.id === selectedItemId) || null : null;
+  const recent = [...state.transactions].sort((left, right) => right.createdAt - left.createdAt).slice(0, 20);
+
+  return (
+    <section>
+      <div className="mb-3 flex items-end justify-between gap-3">
+        <div>
+          <h2 className="text-xl font-black">最近明细</h2>
+          <p className="mt-0.5 text-sm font-semibold text-slate-500">点开查看金额、余额与关联记录</p>
+        </div>
+        <span className="shrink-0 rounded-full bg-purple-100 px-2.5 py-1 text-xs font-black text-purple-700">最近 {recent.length} 条</span>
+      </div>
+      <div className="app-card divide-y divide-purple-50 overflow-hidden">
+        {recent.length === 0 ? <p className="p-4 text-center text-sm font-bold text-slate-500">还没有明细</p> : recent.map((item) => (
+          <button type="button" key={item.id} className="flex w-full items-center gap-3 p-3 text-left transition hover:bg-purple-50" onClick={() => setSelectedItemId(item.id)}>
+            <div className={`grid h-10 w-10 shrink-0 place-items-center rounded-2xl ${item.amountSeconds > 0 ? "bg-emerald-100 text-emerald-700" : "bg-orange-100 text-orange-700"}`}>{item.amountSeconds > 0 ? <TrendingUp size={21} /> : <TrendingDown size={21} />}</div>
+            <div className="min-w-0 flex-1">
+              <div className="flex min-w-0 items-center gap-1.5"><p className="truncate text-sm font-black">{item.workerName || "打工人"} · {item.title}</p>{item.isReversed && <span className="pill shrink-0 bg-slate-100 text-slate-500">已撤销</span>}</div>
+              <p className="mt-0.5 truncate text-xs font-semibold text-slate-500">{transactionTypeLabels[item.type]} · {formatDateTime(item.createdAt)}</p>
+            </div>
+            <div className="shrink-0 text-right">
+              <p className={`text-sm font-black ${item.amountSeconds > 0 ? "text-emerald-600" : "text-orange-600"}`}>{item.amountSeconds > 0 ? "+" : "−"}{formatDuration(Math.abs(item.amountSeconds), Math.abs(item.amountSeconds) < MINUTE)}</p>
+              <p className="mt-0.5 text-[10px] font-bold text-slate-400">查看详情</p>
+            </div>
+            <ChevronRight className="shrink-0 text-slate-300" size={17} />
+          </button>
+        ))}
+      </div>
+      {selectedItem && (
+        <AdminTransactionDetailDialog
+          item={selectedItem}
+          state={state}
+          busy={busy}
+          onClose={() => setSelectedItemId(null)}
+          onReverse={async () => {
+            if (!window.confirm(`确定撤销 ${selectedItem.workerName || "打工人"} 的“${selectedItem.title}”吗？将原额退回。`)) return;
+            const ok = await mutate({ action: "reverse_consumption", transactionId: selectedItem.id, reason: "管理员确认是误触消耗" }, "消耗已撤销，时数已原额退回");
+            if (ok) setSelectedItemId(null);
+          }}
+        />
+      )}
+    </section>
+  );
+}
+
+function AdminTransactionDetailDialog({
+  item,
+  state,
+  busy,
+  onClose,
+  onReverse,
+}: {
+  item: Transaction;
+  state: AdminState;
+  busy: boolean;
+  onClose: () => void;
+  onReverse: () => Promise<void>;
+}) {
+  const rewardItem = item.rewardItemId ? state.rewardItems.find((candidate) => candidate.id === item.rewardItemId) || null : null;
+  const assignment = item.assignmentId
+    ? state.workers.flatMap((worker) => worker.assignments).find((candidate) => candidate.id === item.assignmentId) || null
+    : null;
+  const relatedReversal = item.reversalOfTransactionId
+    ? state.transactions.find((candidate) => candidate.id === item.reversalOfTransactionId) || null
+    : state.transactions.find((candidate) => candidate.reversalOfTransactionId === item.id) || null;
+
+  useEffect(() => {
+    const closeOnEscape = (event: KeyboardEvent) => { if (event.key === "Escape" && !busy) onClose(); };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [busy, onClose]);
+
+  return (
+    <div className="fixed inset-0 z-[70] flex items-end justify-center bg-slate-900/45 p-2 sm:items-center sm:p-5" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !busy) onClose(); }}>
+      <section className="page-enter max-h-[88vh] w-full max-w-md overflow-y-auto rounded-[24px] bg-white p-4 shadow-2xl sm:p-5" role="dialog" aria-modal="true" aria-labelledby="admin-transaction-detail-title">
+        <div className="flex items-start gap-3">
+          <div className={`grid h-12 w-12 shrink-0 place-items-center rounded-2xl ${item.amountSeconds > 0 ? "bg-emerald-100 text-emerald-700" : "bg-orange-100 text-orange-700"}`}>{item.amountSeconds > 0 ? <TrendingUp size={25} /> : <TrendingDown size={25} />}</div>
+          <div className="min-w-0 flex-1">
+            <div className="flex flex-wrap items-center gap-1.5"><h2 id="admin-transaction-detail-title" className="text-xl font-black">{item.title}</h2>{item.isReversed && <span className="pill bg-slate-100 text-slate-500">已撤销</span>}</div>
+            <p className="mt-0.5 text-sm font-black text-purple-700">{item.workerName || "打工人"}</p>
+            <p className="mt-0.5 text-xs font-semibold text-slate-500">{transactionTypeLabels[item.type]}</p>
+          </div>
+          <button type="button" className="grid h-9 w-9 shrink-0 place-items-center rounded-full bg-slate-100 text-slate-600" aria-label="关闭最近明细详情" disabled={busy} onClick={onClose}><XCircle size={19} /></button>
+        </div>
+
+        <div className="mt-3 grid grid-cols-2 gap-2 text-xs">
+          <div className={`rounded-xl px-3 py-2 ${item.amountSeconds > 0 ? "bg-emerald-50" : "bg-orange-50"}`}><p className={item.amountSeconds > 0 ? "font-bold text-emerald-600" : "font-bold text-orange-600"}>本次变化</p><p className={`mt-0.5 text-base font-black ${item.amountSeconds > 0 ? "text-emerald-800" : "text-orange-800"}`}>{item.amountSeconds > 0 ? "+" : "−"}{formatDuration(Math.abs(item.amountSeconds), Math.abs(item.amountSeconds) < MINUTE)}</p></div>
+          <div className="rounded-xl bg-purple-50 px-3 py-2"><p className="font-bold text-purple-500">变化后余额</p><p className="mt-0.5 text-base font-black text-purple-900">{formatDuration(item.balanceAfterSeconds, false)}</p></div>
+          <div className="col-span-2 rounded-xl bg-slate-50 px-3 py-2"><p className="font-bold text-slate-500">记录时间</p><p className="mt-0.5 font-black text-slate-800">{formatDateTime(item.createdAt)}</p></div>
+        </div>
+
+        {item.reason && <p className="mt-2 rounded-xl bg-blue-50 px-3 py-2 text-xs font-semibold leading-5 text-blue-900"><strong>说明：</strong>{item.reason}</p>}
+
+        {(item.startedAt || item.endedAt) && (
+          <div className="mt-2 space-y-1 rounded-xl bg-orange-50 px-3 py-2 text-xs font-semibold leading-5 text-orange-900">
+            {item.startedAt && <p><strong>开始时间：</strong>{formatDateTime(item.startedAt)}</p>}
+            {item.endedAt && <p><strong>结束时间：</strong>{formatDateTime(item.endedAt)}</p>}
+          </div>
+        )}
+
+        {(assignment || rewardItem) && (
+          <div className="mt-2 space-y-1 rounded-xl bg-purple-50 px-3 py-2 text-xs font-semibold leading-5 text-purple-900">
+            {assignment && <p><strong>关联任务：</strong>{assignment.title} · {assignmentStatusLabels[assignment.status]}</p>}
+            {rewardItem && <p><strong>关联奖励券：</strong>{rewardItem.name}</p>}
+          </div>
+        )}
+
+        <div className="mt-2 space-y-1 rounded-xl bg-slate-50 px-3 py-2 text-xs font-semibold leading-5 text-slate-600">
+          <p><strong>操作来源：</strong>{item.actor === "admin" ? "管理员" : item.actor === "system" ? "系统" : "打工人"}</p>
+          {relatedReversal && <p><strong>{item.reversalOfTransactionId ? "原始记录" : "撤销记录"}：</strong>{relatedReversal.title} · {formatDateTime(relatedReversal.createdAt)}</p>}
+        </div>
+
+        {item.type === "consumption" && !item.isReversed && !item.reversalOfTransactionId && <button type="button" className="danger-button mt-4 w-full" disabled={busy} onClick={() => void onReverse()}><XCircle className="mr-1 inline" size={18} />撤销这笔消耗</button>}
+      </section>
+    </div>
+  );
+}
+
 function AdminSettings({
   state,
   mutate,
@@ -1898,7 +2049,6 @@ function AdminSettings({
   onSwitch: () => void;
 }) {
   const [activityName, setActivityName] = useState("");
-  const recent = state.transactions.slice(0, 20);
 
   async function logout() {
     await api("/api/auth", { method: "POST", body: JSON.stringify({ action: "logout_current" }) });
@@ -1929,37 +2079,6 @@ function AdminSettings({
               );
             })}
           </div>
-        </div>
-      </section>
-
-      <section>
-        <SectionTitle title="最近明细" text="所有余额变化都保留记录" />
-        <div className="app-card divide-y divide-purple-50 overflow-hidden">
-          {recent.length === 0 ? <p className="p-5 text-center text-sm font-bold text-slate-500">还没有明细</p> : recent.map((item) => (
-            <div key={item.id} className="flex items-center justify-between gap-3 px-4 py-3">
-              <div className="min-w-0 flex-1">
-                <div className="flex items-center gap-1.5"><p className="truncate text-sm font-black">{item.workerName} · {item.title}</p>{item.isReversed && <span className="pill shrink-0 bg-slate-100 text-slate-500">已撤销</span>}</div>
-                <p className="mt-0.5 text-xs font-semibold text-slate-500">{formatDateTime(item.createdAt)}{item.reason ? ` · ${item.reason}` : ""}</p>
-              </div>
-              <div className="shrink-0 text-right">
-                <span className={`block text-sm font-black ${item.amountSeconds > 0 ? "text-emerald-600" : "text-orange-600"}`}>{item.amountSeconds > 0 ? "+" : "−"}{formatDuration(Math.abs(item.amountSeconds), Math.abs(item.amountSeconds) < MINUTE)}</span>
-                {item.type === "consumption" && !item.isReversed && (
-                  <button
-                    type="button"
-                    className="mt-1 rounded-full bg-orange-100 px-2.5 py-1 text-xs font-black text-orange-800"
-                    disabled={busy}
-                    onClick={() => {
-                      if (window.confirm(`确定撤销 ${item.workerName} 的“${item.title}”吗？将原额退回。`)) {
-                        void mutate({ action: "reverse_consumption", transactionId: item.id, reason: "管理员确认是误触消耗" }, "消耗已撤销，时数已原额退回");
-                      }
-                    }}
-                  >
-                    撤销消耗
-                  </button>
-                )}
-              </div>
-            </div>
-          ))}
         </div>
       </section>
 

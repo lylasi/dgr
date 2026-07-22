@@ -17,7 +17,7 @@ import {
   X,
   XCircle,
 } from "lucide-react";
-import { type ChangeEvent, type FormEvent, useEffect, useState } from "react";
+import { type ChangeEvent, type FormEvent, useEffect, useMemo, useState } from "react";
 import { RewardVisual } from "@/components/shared";
 import type {
   AdminRewardDefinition,
@@ -27,7 +27,7 @@ import type {
   RewardItem,
   RewardKind,
 } from "@/components/types";
-import { formatDateTime, MINUTE } from "@/lib/time";
+import { formatDateTime, formatDuration, MINUTE } from "@/lib/time";
 
 type Mutate = (body: Record<string, unknown>, success: string) => Promise<boolean>;
 
@@ -233,8 +233,6 @@ export function RewardSettingsPanel({
           <ChevronRight className="shrink-0 text-purple-500" size={19} />
         </button>
       </section>
-
-      <RewardHistoryPanel state={state} mutate={mutate} busy={busy} />
 
       {showLibrary && (
         <RewardTemplateLibraryDialog
@@ -638,54 +636,157 @@ function RewardDefinitionDialog({
   );
 }
 
-function RewardHistoryPanel({ state, mutate, busy }: { state: AdminState; mutate: Mutate; busy: boolean }) {
+function rewardStatusClass(status: RewardItem["status"]) {
+  if (status === "available") return "bg-blue-100 text-blue-700";
+  if (status === "cancelled" || status === "expired") return "bg-slate-100 text-slate-500";
+  return "bg-emerald-100 text-emerald-700";
+}
+
+function rewardValueText(item: RewardItem) {
+  if (item.resultSeconds) return `实际入账 ${formatDuration(item.resultSeconds, false)}`;
+  if (item.kind === "random_time") {
+    return `${formatDuration(item.randomMinSeconds || 0, false)}～${formatDuration(item.randomMaxSeconds || 0, false)}`;
+  }
+  if (item.kind === "fixed_time") return formatDuration(item.fixedSeconds || 0, false);
+  return item.physicalDescription || "实物奖励";
+}
+
+function rewardEventAt(item: RewardItem) {
+  return item.usedAt || item.fulfilledAt || item.cancelledAt || item.redeemedAt || item.grantedAt;
+}
+
+export function AdminRewardHistoryPanel({ state, mutate, busy }: { state: AdminState; mutate: Mutate; busy: boolean }) {
   const [workerFilter, setWorkerFilter] = useState("all");
   const [kindFilter, setKindFilter] = useState<"all" | RewardKind>("all");
   const [sourceFilter, setSourceFilter] = useState<"all" | RewardItem["sourceType"]>("all");
   const [statusFilter, setStatusFilter] = useState<"all" | RewardItem["status"]>("all");
-  const rows = state.rewardItems.filter((item) =>
-    (workerFilter === "all" || item.workerId === workerFilter)
-    && (kindFilter === "all" || item.kind === kindFilter)
-    && (sourceFilter === "all" || item.sourceType === sourceFilter)
-    && (statusFilter === "all" || item.status === statusFilter));
+  const [selectedItemId, setSelectedItemId] = useState<string | null>(null);
+  const selectedItem = selectedItemId ? state.rewardItems.find((item) => item.id === selectedItemId) || null : null;
+  const rows = useMemo(() => state.rewardItems
+    .filter((item) =>
+      (workerFilter === "all" || item.workerId === workerFilter)
+      && (kindFilter === "all" || item.kind === kindFilter)
+      && (sourceFilter === "all" || item.sourceType === sourceFilter)
+      && (statusFilter === "all" || item.status === statusFilter))
+    .sort((left, right) => rewardEventAt(right) - rewardEventAt(left))
+    .slice(0, 100), [state.rewardItems, workerFilter, kindFilter, sourceFilter, statusFilter]);
 
   return (
     <section>
-      <RewardSectionTitle title="奖励历史" text="可按打工人、类型、来源和状态查看完整链路" />
-      <div className="app-card p-4">
-        <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
-          <select className="field !min-h-11" value={workerFilter} onChange={(event) => setWorkerFilter(event.target.value)}><option value="all">全部打工人</option>{state.workers.map((worker) => <option key={worker.id} value={worker.id}>{worker.name}</option>)}</select>
-          <select className="field !min-h-11" value={kindFilter} onChange={(event) => setKindFilter(event.target.value as typeof kindFilter)}><option value="all">全部类型</option><option value="random_time">随机券</option><option value="fixed_time">固定券</option><option value="physical">实物券</option></select>
-          <select className="field !min-h-11" value={sourceFilter} onChange={(event) => setSourceFilter(event.target.value as typeof sourceFilter)}><option value="all">全部来源</option><option value="daily">每日派发</option><option value="admin_direct">管理员直发</option></select>
-          <select className="field !min-h-11" value={statusFilter} onChange={(event) => setStatusFilter(event.target.value as typeof statusFilter)}><option value="all">全部状态</option><option value="available">可使用</option><option value="redeemed">已使用</option><option value="fulfilled">已收到</option><option value="cancelled">已撤销</option></select>
+      <div className="mb-3 flex items-end justify-between gap-3">
+        <div>
+          <h2 className="text-xl font-black">奖励历史</h2>
+          <p className="mt-0.5 text-sm font-semibold text-slate-500">点开查看发放、使用与撤销详情</p>
         </div>
-        <div className="mt-3 divide-y divide-purple-50">
-          {rows.length === 0 ? <p className="py-6 text-center text-sm font-bold text-slate-500">没有符合条件的记录</p> : rows.slice(0, 100).map((item) => (
-            <div className="flex items-start gap-3 py-3" key={item.id}>
-              <RewardVisual icon={item.icon} imageUrl={item.imageUrl} theme={item.theme} size={46} />
+        <span className="shrink-0 rounded-full bg-purple-100 px-2.5 py-1 text-xs font-black text-purple-700">{rows.length} 条</span>
+      </div>
+      <div className="app-card overflow-hidden">
+        <div className="grid grid-cols-2 gap-2 border-b border-purple-100 p-3 sm:grid-cols-4">
+          <select aria-label="按打工人筛选奖励历史" className="field !min-h-10 !py-2 text-sm" value={workerFilter} onChange={(event) => setWorkerFilter(event.target.value)}><option value="all">全部打工人</option>{state.workers.map((worker) => <option key={worker.id} value={worker.id}>{worker.name}</option>)}</select>
+          <select aria-label="按类型筛选奖励历史" className="field !min-h-10 !py-2 text-sm" value={kindFilter} onChange={(event) => setKindFilter(event.target.value as typeof kindFilter)}><option value="all">全部类型</option><option value="random_time">随机券</option><option value="fixed_time">固定券</option><option value="physical">实物券</option></select>
+          <select aria-label="按来源筛选奖励历史" className="field !min-h-10 !py-2 text-sm" value={sourceFilter} onChange={(event) => setSourceFilter(event.target.value as typeof sourceFilter)}><option value="all">全部来源</option><option value="daily">每日派发</option><option value="task">任务发放</option><option value="admin_direct">管理员直发</option><option value="achievement">成就奖励</option><option value="adjustment">补发纠错</option></select>
+          <select aria-label="按状态筛选奖励历史" className="field !min-h-10 !py-2 text-sm" value={statusFilter} onChange={(event) => setStatusFilter(event.target.value as typeof statusFilter)}><option value="all">全部状态</option><option value="available">可使用</option><option value="redeemed">已使用</option><option value="fulfilled">已收到</option><option value="cancelled">已撤销</option><option value="expired">已过期</option></select>
+        </div>
+        <div className="divide-y divide-purple-50">
+          {rows.length === 0 ? <p className="p-4 text-center text-sm font-bold text-slate-500">没有符合条件的记录</p> : rows.map((item) => (
+            <button type="button" className="flex w-full items-center gap-3 p-3 text-left transition hover:bg-purple-50" key={item.id} onClick={() => setSelectedItemId(item.id)}>
+              <RewardVisual icon={item.icon} imageUrl={item.imageUrl} theme={item.theme} size={40} />
               <div className="min-w-0 flex-1">
-                <div className="flex flex-wrap items-center gap-2"><p className="truncate text-sm font-black">{item.workerName} · {item.name}</p><span className={`pill ${item.status === "available" ? "bg-blue-100 text-blue-700" : item.status === "cancelled" ? "bg-slate-100 text-slate-500" : "bg-emerald-100 text-emerald-700"}`}>{statusLabels[item.status]}</span></div>
-                <p className="mt-1 text-xs font-semibold text-slate-500">{kindLabels[item.kind]} · {sourceLabels[item.sourceType]} · {formatDateTime(item.usedAt || item.cancelledAt || item.grantedAt)}</p>
-                <p className="mt-1 text-xs font-semibold text-slate-600">发放原因：{item.grantReason}</p>
-                {item.resultSeconds && <p className="mt-1 text-xs font-black text-emerald-700">实际入账 {item.resultSeconds / MINUTE} 分钟</p>}
-                {item.fulfillmentInstructions && <p className="mt-1 text-xs font-semibold text-slate-600">交付说明：{item.fulfillmentInstructions}</p>}
-                {item.cancellationReason && <p className="mt-1 text-xs font-semibold text-slate-500">撤销原因：{item.cancellationReason}</p>}
+                <div className="flex min-w-0 items-center gap-1.5"><p className="truncate text-sm font-black">{item.workerName || "打工人"} · {item.name}</p><span className={`shrink-0 rounded-md px-1.5 py-0.5 text-[10px] font-black ${rewardStatusClass(item.status)}`}>{statusLabels[item.status]}</span></div>
+                <p className="mt-0.5 truncate text-xs font-semibold text-slate-500">{sourceLabels[item.sourceType]} · {formatDateTime(rewardEventAt(item))}</p>
               </div>
-              {item.status === "available" && (
-                <button
-                  className="danger-button shrink-0 !min-h-10 !px-2 text-xs"
-                  disabled={busy}
-                  onClick={() => {
-                    const reason = window.prompt(`请输入撤销“${item.name}”的原因：`)?.trim();
-                    if (reason) void mutate({ action: "cancel_reward_item", rewardItemId: item.id, reason }, "未使用奖励券已撤销");
-                  }}
-                >撤销</button>
-              )}
-            </div>
+              <div className="shrink-0 text-right">
+                <p className={`max-w-28 truncate text-xs font-black ${item.resultSeconds ? "text-emerald-700" : "text-purple-700"}`}>{rewardValueText(item)}</p>
+                <p className="mt-0.5 text-[10px] font-bold text-slate-400">查看详情</p>
+              </div>
+            </button>
           ))}
         </div>
       </div>
+      {selectedItem && (
+        <AdminRewardDetailDialog
+          item={selectedItem}
+          busy={busy}
+          onClose={() => setSelectedItemId(null)}
+          onCancel={async () => {
+            const reason = window.prompt(`请输入撤销“${selectedItem.name}”的原因：`)?.trim();
+            if (!reason) return;
+            const ok = await mutate({ action: "cancel_reward_item", rewardItemId: selectedItem.id, reason }, "未使用奖励券已撤销");
+            if (ok) setSelectedItemId(null);
+          }}
+        />
+      )}
     </section>
+  );
+}
+
+function AdminRewardDetailDialog({
+  item,
+  busy,
+  onClose,
+  onCancel,
+}: {
+  item: RewardItem;
+  busy: boolean;
+  onClose: () => void;
+  onCancel: () => Promise<void>;
+}) {
+  useEffect(() => {
+    const closeOnEscape = (event: KeyboardEvent) => { if (event.key === "Escape" && !busy) onClose(); };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [busy, onClose]);
+
+  return (
+    <div className="fixed inset-0 z-[70] flex items-end justify-center bg-slate-900/45 p-2 sm:items-center sm:p-5" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !busy) onClose(); }}>
+      <section className="page-enter max-h-[88vh] w-full max-w-md overflow-y-auto rounded-[24px] bg-white p-4 shadow-2xl sm:p-5" role="dialog" aria-modal="true" aria-labelledby="admin-reward-detail-title">
+        <div className="flex items-start gap-3">
+          <RewardVisual icon={item.icon} imageUrl={item.imageUrl} theme={item.theme} size={56} />
+          <div className="min-w-0 flex-1">
+            <div className="flex flex-wrap items-center gap-1.5">
+              <h2 id="admin-reward-detail-title" className="text-xl font-black">{item.name}</h2>
+              <span className={`rounded-md px-1.5 py-0.5 text-[10px] font-black ${rewardStatusClass(item.status)}`}>{statusLabels[item.status]}</span>
+            </div>
+            <p className="mt-0.5 text-sm font-black text-purple-700">{item.workerName || "打工人"}</p>
+            <p className="mt-0.5 text-xs font-semibold text-slate-500">{kindLabels[item.kind]} · 永久有效</p>
+          </div>
+          <button type="button" className="grid h-9 w-9 shrink-0 place-items-center rounded-full bg-slate-100 text-slate-600" aria-label="关闭奖励历史详情" disabled={busy} onClick={onClose}><XCircle size={19} /></button>
+        </div>
+
+        {item.description && <p className="mt-3 rounded-xl bg-slate-50 px-3 py-2 text-sm font-semibold leading-5 text-slate-600">{item.description}</p>}
+
+        <div className="mt-3 grid grid-cols-2 gap-2 text-xs">
+          <div className="rounded-xl bg-purple-50 px-3 py-2"><p className="font-bold text-purple-500">奖励内容</p><p className="mt-0.5 font-black text-purple-900">{rewardValueText(item)}</p></div>
+          <div className="rounded-xl bg-blue-50 px-3 py-2"><p className="font-bold text-blue-500">来源</p><p className="mt-0.5 font-black text-blue-900">{sourceLabels[item.sourceType]}</p></div>
+          <div className="rounded-xl bg-slate-50 px-3 py-2"><p className="font-bold text-slate-500">发放时间</p><p className="mt-0.5 font-black text-slate-800">{formatDateTime(item.grantedAt)}</p></div>
+          <div className="rounded-xl bg-emerald-50 px-3 py-2"><p className="font-bold text-emerald-600">当前状态</p><p className="mt-0.5 font-black text-emerald-800">{statusLabels[item.status]}</p></div>
+        </div>
+
+        <div className="mt-2 space-y-1 rounded-xl bg-purple-50 px-3 py-2 text-xs font-semibold leading-5 text-purple-900">
+          <p><strong>发放原因：</strong>{item.grantReason || "未填写"}</p>
+          {item.grantedBy && <p><strong>发放人：</strong>{item.grantedBy === "admin" ? "管理员" : item.grantedBy}</p>}
+        </div>
+
+        {item.kind === "physical" && (item.physicalDescription || item.fulfillmentInstructions) && (
+          <div className="mt-2 space-y-1 rounded-xl bg-blue-50 px-3 py-2 text-xs font-semibold leading-5 text-blue-900">
+            {item.physicalDescription && <p><strong>实物内容：</strong>{item.physicalDescription}</p>}
+            {item.fulfillmentInstructions && <p><strong>领取说明：</strong>{item.fulfillmentInstructions}</p>}
+          </div>
+        )}
+
+        {(item.resultSeconds || item.redeemedAt || item.usedAt || item.fulfilledAt || item.cancelledAt || item.cancellationReason) && (
+          <div className="mt-2 space-y-1 rounded-xl bg-emerald-50 px-3 py-2 text-xs font-semibold leading-5 text-emerald-900">
+            {item.resultSeconds && <p><strong>实际入账：</strong>{formatDuration(item.resultSeconds, false)}</p>}
+            {(item.usedAt || item.redeemedAt) && <p><strong>使用时间：</strong>{formatDateTime(item.usedAt || item.redeemedAt!)}</p>}
+            {item.fulfilledAt && <p><strong>确认收到：</strong>{formatDateTime(item.fulfilledAt)}</p>}
+            {item.cancelledAt && <p><strong>撤销时间：</strong>{formatDateTime(item.cancelledAt)}</p>}
+            {item.cancellationReason && <p><strong>撤销原因：</strong>{item.cancellationReason}</p>}
+          </div>
+        )}
+
+        {item.status === "available" && <button type="button" className="danger-button mt-4 w-full" disabled={busy} onClick={() => void onCancel()}><XCircle className="mr-1 inline" size={18} />撤销这张奖励券</button>}
+      </section>
+    </div>
   );
 }
 

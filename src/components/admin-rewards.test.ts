@@ -67,6 +67,7 @@ describe("RewardSettingsPanel", () => {
     expect(markup).toContain("启用 1");
     expect(markup).toContain("随机 1 · 固定 1 · 实物 0");
     expect(markup).toContain("查看全部");
+    expect(markup).not.toContain("奖励历史");
     expect(markup).not.toContain("不应默认展开的固定券");
     expect(markup).not.toContain("不应默认展开的随机券");
   });
