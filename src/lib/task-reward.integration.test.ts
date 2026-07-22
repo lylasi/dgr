@@ -220,6 +220,30 @@ describe.sequential("task reward combinations", () => {
   });
 
   it("records one independent outcome per candidate and honors 100% and 0% exactly", () => {
+    const mysteryPreviewTaskId = createTask({
+      title: "概率券预览脱敏",
+      description: "领取前只能看到神秘奖励",
+      rewardSeconds: MINUTE,
+      targetWorkerId: workerId,
+      timingMode: "none",
+      bonusEnabled: false,
+      rewardBindings: [
+        { definitionId: neverDefinitionId, grantTier: "normal", quantity: 3, probabilityPercent: 30 },
+      ],
+      requestId: nextId("mystery-preview-task"),
+    });
+    const mysteryPreview = getWorkerState(workerId).availableTasks
+      .find((task) => task.id === mysteryPreviewTaskId)!.rewardBindings;
+    expect(mysteryPreview).toHaveLength(1);
+    expect(mysteryPreview[0]).toMatchObject({
+      definitionId: "mystery",
+      name: "神秘奖励券",
+      quantity: 1,
+      probabilityPercent: -1,
+      isMystery: true,
+    });
+    expect(mysteryPreview[0].name).not.toBe("永不中奖券");
+
     const taskId = createTask({
       title: "概率与多张测试",
       description: "每张分别判定",
@@ -234,6 +258,13 @@ describe.sequential("task reward combinations", () => {
       assignNow: true,
       requestId: nextId("probability-task"),
     });
+    const concealedItems = assignmentFor(taskId).rewardItems;
+    expect(concealedItems.find((item) => item.definitionId === normalDefinitionId)).toMatchObject({
+      quantity: 2,
+      probabilityPercent: 100,
+    });
+    expect(concealedItems.some((item) => item.definitionId === neverDefinitionId)).toBe(false);
+    expect(concealedItems.some((item) => "isMystery" in item && item.isMystery)).toBe(false);
     const assignmentId = submitTask(taskId);
     const result = reviewAssignment({
       assignmentId,
@@ -254,7 +285,12 @@ describe.sequential("task reward combinations", () => {
     expect(outcomes.map((outcome) => outcome.awarded)).toEqual([1, 1, 0, 0, 0]);
     const publicItems = assignmentFor(taskId).rewardItems;
     expect(publicItems.find((item) => item.definitionId === normalDefinitionId)?.awardedQuantity).toBe(2);
-    expect(publicItems.find((item) => item.definitionId === neverDefinitionId)?.awardedQuantity).toBe(0);
+    expect(publicItems.some((item) => item.definitionId === neverDefinitionId)).toBe(false);
+    const adminItems = getAdminState().workers
+      .flatMap((worker) => worker.assignments)
+      .find((assignment) => assignment.id === assignmentId)!.rewardItems;
+    expect(adminItems.find((item) => item.definitionId === normalDefinitionId)?.awardedQuantity).toBe(2);
+    expect(adminItems.find((item) => item.definitionId === neverDefinitionId)?.awardedQuantity).toBe(0);
   });
 
   it("uses the assignment snapshot after a template is changed", () => {

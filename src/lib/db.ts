@@ -8,7 +8,7 @@ declare global {
   var __penWorkerSchemaVersion: number | undefined;
 }
 
-const CURRENT_SCHEMA_VERSION = 7;
+const CURRENT_SCHEMA_VERSION = 8;
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -51,6 +51,7 @@ CREATE TABLE IF NOT EXISTS tasks (
   bonus_criteria TEXT,
   available_from INTEGER,
   due_at INTEGER,
+  repeatable INTEGER NOT NULL DEFAULT 0 CHECK(repeatable IN (0, 1)),
   status TEXT NOT NULL DEFAULT 'published' CHECK(status IN ('published', 'closed')),
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
@@ -78,11 +79,12 @@ CREATE TABLE IF NOT EXISTS task_assignments (
   approved_reward_grant_id TEXT UNIQUE REFERENCES reward_grant_batches(id),
   excellent_multiplier_bps INTEGER NOT NULL DEFAULT 20000 CHECK(excellent_multiplier_bps >= 10000),
   assigned_by TEXT NOT NULL DEFAULT 'worker',
+  participation_number INTEGER NOT NULL DEFAULT 1 CHECK(participation_number > 0),
   claimed_at INTEGER NOT NULL,
   submitted_at INTEGER,
   updated_at INTEGER NOT NULL,
   version INTEGER NOT NULL DEFAULT 1,
-  UNIQUE(task_id, worker_id)
+  UNIQUE(task_id, worker_id, participation_number)
 );
 
 CREATE TABLE IF NOT EXISTS consumption_activities (
@@ -672,6 +674,93 @@ export function migrateTaskRewardSchema(db: Database.Database, now = Date.now())
   db.prepare("INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (7, ?)").run(now);
 }
 
+export function migrateRepeatableTaskSchema(db: Database.Database, now = Date.now()): void {
+  const taskColumns = db.pragma("table_info(tasks)") as Array<{ name: string }>;
+  const assignmentColumns = db.pragma("table_info(task_assignments)") as Array<{ name: string }>;
+  const tasksMigrated = taskColumns.some((column) => column.name === "repeatable");
+  const assignmentsMigrated = assignmentColumns.some((column) => column.name === "participation_number");
+
+  if (!tasksMigrated) {
+    db.exec(`
+      ALTER TABLE tasks ADD COLUMN repeatable INTEGER NOT NULL DEFAULT 0
+        CHECK(repeatable IN (0, 1));
+    `);
+  }
+
+  if (!assignmentsMigrated) {
+    db.pragma("foreign_keys = OFF");
+    try {
+      db.exec(`
+        BEGIN IMMEDIATE;
+        CREATE TABLE task_assignments_new (
+          id TEXT PRIMARY KEY,
+          task_id TEXT NOT NULL REFERENCES tasks(id),
+          worker_id TEXT NOT NULL REFERENCES workers(id),
+          title_snapshot TEXT NOT NULL,
+          description_snapshot TEXT NOT NULL,
+          reward_seconds INTEGER NOT NULL CHECK(reward_seconds > 0),
+          timing_mode TEXT NOT NULL CHECK(timing_mode IN ('none', 'optional', 'required')),
+          minimum_duration_seconds INTEGER,
+          bonus_enabled INTEGER NOT NULL CHECK(bonus_enabled IN (0, 1)),
+          bonus_criteria TEXT,
+          due_at INTEGER,
+          status TEXT NOT NULL DEFAULT 'claimed'
+            CHECK(status IN ('claimed', 'in_progress', 'submitted', 'revision_requested', 'approved', 'rejected', 'cancelled')),
+          submission_note TEXT,
+          review_multiplier REAL CHECK(review_multiplier IS NULL OR review_multiplier >= 1),
+          review_tier TEXT CHECK(review_tier IS NULL OR review_tier IN ('normal', 'excellent')),
+          review_note TEXT,
+          reviewed_at INTEGER,
+          approved_transaction_id TEXT UNIQUE,
+          approved_reward_grant_id TEXT UNIQUE REFERENCES reward_grant_batches(id),
+          excellent_multiplier_bps INTEGER NOT NULL DEFAULT 20000 CHECK(excellent_multiplier_bps >= 10000),
+          assigned_by TEXT NOT NULL DEFAULT 'worker',
+          participation_number INTEGER NOT NULL DEFAULT 1 CHECK(participation_number > 0),
+          claimed_at INTEGER NOT NULL,
+          submitted_at INTEGER,
+          updated_at INTEGER NOT NULL,
+          version INTEGER NOT NULL DEFAULT 1,
+          UNIQUE(task_id, worker_id, participation_number)
+        );
+        INSERT INTO task_assignments_new(
+          id, task_id, worker_id, title_snapshot, description_snapshot,
+          reward_seconds, timing_mode, minimum_duration_seconds, bonus_enabled,
+          bonus_criteria, due_at, status, submission_note, review_multiplier,
+          review_tier, review_note, reviewed_at, approved_transaction_id,
+          approved_reward_grant_id, excellent_multiplier_bps, assigned_by,
+          participation_number, claimed_at, submitted_at, updated_at, version
+        )
+        SELECT
+          id, task_id, worker_id, title_snapshot, description_snapshot,
+          reward_seconds, timing_mode, minimum_duration_seconds, bonus_enabled,
+          bonus_criteria, due_at, status, submission_note, review_multiplier,
+          review_tier, review_note, reviewed_at, approved_transaction_id,
+          approved_reward_grant_id, excellent_multiplier_bps, assigned_by,
+          1, claimed_at, submitted_at, updated_at, version
+        FROM task_assignments;
+        DROP TABLE task_assignments;
+        ALTER TABLE task_assignments_new RENAME TO task_assignments;
+        COMMIT;
+      `);
+    } catch (error) {
+      if (db.inTransaction) db.exec("ROLLBACK");
+      throw error;
+    } finally {
+      db.pragma("foreign_keys = ON");
+    }
+  }
+
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_assignments_worker_status
+      ON task_assignments(worker_id, status, updated_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_assignments_status
+      ON task_assignments(status, submitted_at);
+    CREATE INDEX IF NOT EXISTS idx_assignments_task_worker
+      ON task_assignments(task_id, worker_id, participation_number DESC);
+  `);
+  db.prepare("INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (8, ?)").run(now);
+}
+
 function initializeDatabase(db: Database.Database) {
   db.pragma("foreign_keys = ON");
   db.pragma("busy_timeout = 5000");
@@ -692,6 +781,7 @@ function initializeDatabase(db: Database.Database) {
   db.prepare("INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (5, ?)").run(now);
   migrateRewardSchema(db, now);
   migrateTaskRewardSchema(db, now);
+  migrateRepeatableTaskSchema(db, now);
   db.prepare(`
     INSERT OR IGNORE INTO app_settings(key, value, updated_at)
     VALUES ('reward_system_enabled', '1', ?)
@@ -778,6 +868,7 @@ export type TaskRow = {
   bonus_criteria: string | null;
   available_from: number | null;
   due_at: number | null;
+  repeatable: number;
   status: "published" | "closed";
   created_at: number;
   updated_at: number;
@@ -805,6 +896,7 @@ export type AssignmentRow = {
   approved_reward_grant_id: string | null;
   excellent_multiplier_bps: number;
   assigned_by: string;
+  participation_number: number;
   claimed_at: number;
   submitted_at: number | null;
   updated_at: number;

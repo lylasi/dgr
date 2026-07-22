@@ -6,7 +6,6 @@ import {
   assignTask,
   cancelAssignment,
   cancelConsumptionTimer,
-  closeTask,
   createConsumptionActivity,
   createTask,
   createWorker,
@@ -21,8 +20,10 @@ import {
   setWorkerAvatarImage,
   startTimer,
   stopTimer,
+  setTaskStatus,
   toggleConsumptionActivity,
   updateWorker,
+  updateTask,
 } from "@/lib/service";
 import { getRequestSession, isAdminAuthorized } from "@/lib/session";
 import {
@@ -148,11 +149,29 @@ const mutationSchema = z.discriminatedUnion("action", [
     excellentMultiplier: z.number().min(1).default(2),
     bonusCriteria: z.string().trim().max(300).nullable().optional(),
     rewardBindings: z.array(taskRewardBinding).default([]),
+    repeatable: z.boolean().default(false),
     dueAt: z.number().int().positive().nullable().optional(),
     assignNow: z.boolean().optional(),
     requestId,
   }),
-  z.object({ action: z.literal("close_task"), taskId: z.string().uuid(), requestId }),
+  z.object({ action: z.literal("set_task_status"), taskId: z.string().uuid(), status: z.enum(["published", "closed"]), requestId }),
+  z.object({
+    action: z.literal("update_task"),
+    taskId: z.string().uuid(),
+    title: z.string().trim().min(1).max(60),
+    description: z.string().trim().max(600).default(""),
+    rewardSeconds: z.number().int().positive().max(86400),
+    targetWorkerId: workerId.nullable().optional(),
+    timingMode: z.enum(["none", "optional", "required"]),
+    minimumDurationSeconds: z.number().int().min(0).max(86400).nullable().optional(),
+    bonusEnabled: z.boolean(),
+    excellentMultiplier: z.number().min(1).default(2),
+    bonusCriteria: z.string().trim().max(300).nullable().optional(),
+    rewardBindings: z.array(taskRewardBinding).default([]),
+    repeatable: z.boolean().default(false),
+    dueAt: z.number().int().positive().nullable().optional(),
+    requestId,
+  }),
   z.object({ action: z.literal("assign_task"), taskId: z.string().uuid(), workerId, requestId }),
   z.object({
     action: z.literal("review"),
@@ -299,8 +318,11 @@ export async function POST(request: NextRequest) {
       case "create_task":
         createTask(input);
         break;
-      case "close_task":
-        closeTask(input.taskId, input.requestId);
+      case "set_task_status":
+        setTaskStatus(input.taskId, input.status, input.requestId);
+        break;
+      case "update_task":
+        updateTask(input);
         break;
       case "assign_task":
         assignTask(input.taskId, input.workerId, input.requestId);

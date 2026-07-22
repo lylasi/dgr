@@ -332,7 +332,77 @@ function publicWorker(db: Db, worker: WorkerRow) {
   };
 }
 
-function publicTask(db: Db, task: TaskRow) {
+function concealedTaskRewardBindings(items: ReturnType<typeof getPublicTaskRewardBindings>) {
+  return (["normal", "excellent_bonus"] as const).flatMap((grantTier) => {
+    const tierItems = items.filter((item) => item.grantTier === grantTier);
+    const certainItems = tierItems.filter((item) => item.probabilityPercent === 100);
+    const uncertainItem = tierItems.find((item) => item.probabilityPercent > 0 && item.probabilityPercent < 100);
+    if (!uncertainItem) return certainItems;
+    return [
+      ...certainItems,
+      {
+        ...uncertainItem,
+        bindingId: `mystery:${grantTier}`,
+        definitionId: "mystery",
+        quantity: 1,
+        probabilityPercent: -1,
+        name: "神秘奖励券",
+        description: "",
+        icon: "sparkles",
+        theme: grantTier === "excellent_bonus" ? "orange" : "purple",
+        kind: "physical" as const,
+        randomMinSeconds: null,
+        randomMaxSeconds: null,
+        fixedSeconds: null,
+        physicalDescription: "完成并审核后揭晓",
+        fulfillmentInstructions: null,
+        imageUrl: null,
+        isMystery: true,
+      },
+    ];
+  });
+}
+
+function concealedAssignmentRewardItems(items: ReturnType<typeof getPublicAssignmentRewardItems>) {
+  return (["normal", "excellent_bonus"] as const).flatMap((grantTier) => {
+    const tierItems = items.filter((item) => item.grantTier === grantTier);
+    const certainItems = tierItems.filter((item) => item.probabilityPercent === 100);
+    const awardedItems = tierItems
+      .filter((item) => item.probabilityPercent > 0 && item.probabilityPercent < 100 && (item.awardedQuantity || 0) > 0)
+      .map((item) => ({ ...item, probabilityPercent: 100 }));
+    if (tierItems.some((item) => item.outcomeCount > 0)) return [...certainItems, ...awardedItems];
+    const uncertainItem = tierItems.find((item) => item.probabilityPercent > 0 && item.probabilityPercent < 100);
+    if (!uncertainItem) return certainItems;
+    return [
+      ...certainItems,
+      {
+        ...uncertainItem,
+        id: `mystery:${grantTier}`,
+        definitionId: null,
+        definitionVersion: null,
+        quantity: 1,
+        probabilityPercent: -1,
+        name: "神秘奖励券",
+        description: "",
+        icon: "sparkles",
+        theme: grantTier === "excellent_bonus" ? "orange" : "purple",
+        kind: "physical" as const,
+        randomMinSeconds: null,
+        randomMaxSeconds: null,
+        fixedSeconds: null,
+        physicalDescription: "完成并审核后揭晓",
+        fulfillmentInstructions: null,
+        imageUrl: null,
+        outcomeCount: 0,
+        awardedQuantity: null,
+        isMystery: true,
+      },
+    ];
+  });
+}
+
+function publicTask(db: Db, task: TaskRow, concealUncertainRewards = false) {
+  const rewardBindings = getPublicTaskRewardBindings(db, task.id);
   return {
     id: task.id,
     title: task.title,
@@ -346,9 +416,10 @@ function publicTask(db: Db, task: TaskRow) {
     bonusCriteria: task.bonus_criteria,
     availableFrom: task.available_from,
     dueAt: task.due_at,
+    repeatable: Boolean(task.repeatable),
     status: task.status,
     createdAt: task.created_at,
-    rewardBindings: getPublicTaskRewardBindings(db, task.id),
+    rewardBindings: concealUncertainRewards ? concealedTaskRewardBindings(rewardBindings) : rewardBindings,
   };
 }
 
@@ -365,7 +436,8 @@ function assignmentDuration(db: Db, assignmentId: string): number {
   return row.total;
 }
 
-function publicAssignment(db: Db, assignment: AssignmentRow) {
+function publicAssignment(db: Db, assignment: AssignmentRow, concealUncertainRewards = false) {
+  const rewardItems = getPublicAssignmentRewardItems(db, assignment.id);
   return {
     id: assignment.id,
     taskId: assignment.task_id,
@@ -388,7 +460,7 @@ function publicAssignment(db: Db, assignment: AssignmentRow) {
     claimedAt: assignment.claimed_at,
     submittedAt: assignment.submitted_at,
     durationSeconds: assignmentDuration(db, assignment.id),
-    rewardItems: getPublicAssignmentRewardItems(db, assignment.id),
+    rewardItems: concealUncertainRewards ? concealedAssignmentRewardItems(rewardItems) : rewardItems,
   };
 }
 
@@ -644,28 +716,29 @@ function createAssignmentWithin(db: Db, task: TaskRow, workerId: string, assigne
     throw new AppError("这个任务已经过期。", 409, "TASK_EXPIRED");
   }
 
-  const previous = db
-    .prepare("SELECT * FROM task_assignments WHERE task_id = ? AND worker_id = ?")
-    .get(task.id, workerId) as AssignmentRow | undefined;
-  if (previous) {
-    if (previous.status !== "cancelled") {
-      throw new AppError("这个任务已经领取过了。", 409, "TASK_ALREADY_CLAIMED");
-    }
-    const previousDuration = assignmentDuration(db, previous.id);
+  const previousAssignments = db
+    .prepare("SELECT * FROM task_assignments WHERE task_id = ? AND worker_id = ? ORDER BY participation_number DESC")
+    .all(task.id, workerId) as AssignmentRow[];
+  const activeAssignment = previousAssignments.find((assignment) =>
+    ["claimed", "in_progress", "submitted", "revision_requested"].includes(assignment.status),
+  );
+  if (activeAssignment) {
+    throw new AppError("这个任务已经在进行或等待审核。", 409, "TASK_ALREADY_CLAIMED");
+  }
+  if (!task.repeatable && previousAssignments.some((assignment) => assignment.status !== "cancelled")) {
+    throw new AppError("这个任务只能参加一次。", 409, "TASK_ALREADY_CLAIMED");
+  }
+  const cancelledAssignment = previousAssignments.find((assignment) => assignment.status === "cancelled");
+  if (cancelledAssignment) {
+    const previousDuration = assignmentDuration(db, cancelledAssignment.id);
     if (previousDuration > 0) {
       db.prepare(`
         INSERT INTO timer_adjustments(
           id, worker_id, assignment_id, delta_seconds, actor, reason, request_id, created_at
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
-        uniqueId(),
-        workerId,
-        previous.id,
-        -previousDuration,
-        assignedBy,
-        "重新领取任务，累计时长从 0 开始",
-        uniqueId(),
-        now,
+        uniqueId(), workerId, cancelledAssignment.id, -previousDuration, assignedBy,
+        "重新领取任务，累计时长从 0 开始", uniqueId(), now,
       );
     }
     db.prepare(`
@@ -676,27 +749,17 @@ function createAssignmentWithin(db: Db, task: TaskRow, workerId: string, assigne
         status = 'claimed', submission_note = NULL,
         review_multiplier = NULL, review_tier = NULL, review_note = NULL, reviewed_at = NULL,
         approved_transaction_id = NULL, approved_reward_grant_id = NULL,
-        assigned_by = ?, claimed_at = ?,
-        submitted_at = NULL, updated_at = ?, version = version + 1
+        assigned_by = ?, claimed_at = ?, submitted_at = NULL, updated_at = ?, version = version + 1
       WHERE id = ?
     `).run(
-      task.title,
-      task.description,
-      task.reward_seconds,
-      task.timing_mode,
-      task.minimum_duration_seconds,
-      task.bonus_enabled,
-      task.excellent_multiplier_bps,
-      task.bonus_criteria,
-      task.due_at,
-      assignedBy,
-      now,
-      now,
-      previous.id,
+      task.title, task.description, task.reward_seconds, task.timing_mode,
+      task.minimum_duration_seconds, task.bonus_enabled, task.excellent_multiplier_bps,
+      task.bonus_criteria, task.due_at, assignedBy, now, now, cancelledAssignment.id,
     );
-    snapshotAssignmentRewardsWithin(db, previous.id, task.id, now);
-    return previous.id;
+    snapshotAssignmentRewardsWithin(db, cancelledAssignment.id, task.id, now);
+    return cancelledAssignment.id;
   }
+  const participationNumber = (previousAssignments[0]?.participation_number || 0) + 1;
 
   const id = uniqueId();
   try {
@@ -704,9 +767,9 @@ function createAssignmentWithin(db: Db, task: TaskRow, workerId: string, assigne
       INSERT INTO task_assignments(
         id, task_id, worker_id, title_snapshot, description_snapshot,
         reward_seconds, timing_mode, minimum_duration_seconds, bonus_enabled,
-        excellent_multiplier_bps, bonus_criteria, due_at, assigned_by,
+        excellent_multiplier_bps, bonus_criteria, due_at, assigned_by, participation_number,
         claimed_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       id,
       task.id,
@@ -721,6 +784,7 @@ function createAssignmentWithin(db: Db, task: TaskRow, workerId: string, assigne
       task.bonus_criteria,
       task.due_at,
       assignedBy,
+      participationNumber,
       now,
       now,
     );
@@ -745,6 +809,7 @@ export function createTask(input: {
   excellentMultiplier?: number;
   bonusCriteria?: string | null;
   rewardBindings?: TaskRewardBindingInput[];
+  repeatable?: boolean;
   dueAt?: number | null;
   assignNow?: boolean;
   requestId?: string;
@@ -768,8 +833,8 @@ export function createTask(input: {
         id, title, description, reward_seconds, target_worker_id,
         timing_mode, minimum_duration_seconds, bonus_enabled,
         excellent_multiplier_bps, bonus_criteria,
-        due_at, status, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'published', ?, ?)
+        due_at, repeatable, status, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'published', ?, ?)
     `).run(
       id,
       input.title.trim(),
@@ -782,6 +847,7 @@ export function createTask(input: {
       excellentMultiplierBps,
       input.bonusEnabled ? input.bonusCriteria?.trim() || null : null,
       input.dueAt || null,
+      input.repeatable ? 1 : 0,
       now,
       now,
     );
@@ -983,6 +1049,62 @@ export function closeTask(taskId: string, mutationId?: string) {
     db.prepare("UPDATE tasks SET status = 'closed', updated_at = ? WHERE id = ?")
       .run(Date.now(), taskId);
     audit(db, "admin", "task_closed", "task", taskId, "关闭任务", id);
+  })();
+}
+
+export function setTaskStatus(taskId: string, status: "published" | "closed", mutationId?: string) {
+  const db = getDb();
+  const id = requestId(mutationId);
+  db.transaction(() => {
+    const task = getTaskRow(db, taskId);
+    if (status === "published" && task.due_at && task.due_at < Date.now()) {
+      throw new AppError("截止时间已过，请先编辑截止时间再重新开启。", 409, "TASK_EXPIRED");
+    }
+    db.prepare("UPDATE tasks SET status = ?, updated_at = ? WHERE id = ?")
+      .run(status, Date.now(), taskId);
+    audit(db, "admin", status === "published" ? "task_reopened" : "task_closed", "task", taskId, status === "published" ? "重新开启任务" : "关闭任务", id);
+  })();
+}
+
+export function updateTask(input: {
+  taskId: string;
+  title: string;
+  description: string;
+  rewardSeconds: number;
+  targetWorkerId?: string | null;
+  timingMode: TaskRow["timing_mode"];
+  minimumDurationSeconds?: number | null;
+  bonusEnabled: boolean;
+  excellentMultiplier?: number;
+  bonusCriteria?: string | null;
+  rewardBindings?: TaskRewardBindingInput[];
+  repeatable?: boolean;
+  dueAt?: number | null;
+  requestId?: string;
+}) {
+  const db = getDb();
+  const mutationId = requestId(input.requestId);
+  const excellentMultiplierBps = Math.round((input.excellentMultiplier ?? 2) * 10_000);
+  if (!Number.isSafeInteger(excellentMultiplierBps) || excellentMultiplierBps < 10_000) {
+    throw new AppError("优秀完成倍率必须是大于或等于 1 的有效数字。", 400, "INVALID_EXCELLENT_MULTIPLIER");
+  }
+  db.transaction(() => {
+    getTaskRow(db, input.taskId);
+    if (input.targetWorkerId) getWorkerRow(db, input.targetWorkerId);
+    const now = Date.now();
+    db.prepare(`
+      UPDATE tasks SET title = ?, description = ?, reward_seconds = ?, target_worker_id = ?,
+        timing_mode = ?, minimum_duration_seconds = ?, bonus_enabled = ?,
+        excellent_multiplier_bps = ?, bonus_criteria = ?, due_at = ?, repeatable = ?, updated_at = ?
+      WHERE id = ?
+    `).run(
+      input.title.trim(), input.description.trim(), input.rewardSeconds, input.targetWorkerId || null,
+      input.timingMode, input.minimumDurationSeconds || null, input.bonusEnabled ? 1 : 0,
+      excellentMultiplierBps, input.bonusEnabled ? input.bonusCriteria?.trim() || null : null,
+      input.dueAt || null, input.repeatable ? 1 : 0, now, input.taskId,
+    );
+    replaceTaskRewardBindingsWithin(db, input.taskId, input.rewardBindings || [], input.bonusEnabled, now);
+    audit(db, "admin", "task_updated", "task", input.taskId, `编辑任务：${input.title.trim()}`, mutationId);
   })();
 }
 
@@ -1655,13 +1777,17 @@ export function getWorkerState(workerId: string) {
       AND (t.due_at IS NULL OR t.due_at >= ?)
       AND NOT EXISTS (
         SELECT 1 FROM task_assignments a
-        WHERE a.task_id = t.id AND a.worker_id = ? AND a.status <> 'cancelled'
+        WHERE a.task_id = t.id AND a.worker_id = ?
+          AND (
+            a.status IN ('claimed', 'in_progress', 'submitted', 'revision_requested')
+            OR (t.repeatable = 0 AND a.status <> 'cancelled')
+          )
       )
     ORDER BY t.created_at DESC
-  `).all(workerId, now, now, workerId) as TaskRow[]).map((row) => publicTask(db, row));
+  `).all(workerId, now, now, workerId) as TaskRow[]).map((row) => publicTask(db, row, true));
   const assignments = (db
     .prepare("SELECT * FROM task_assignments WHERE worker_id = ? ORDER BY updated_at DESC")
-    .all(workerId) as AssignmentRow[]).map((row) => publicAssignment(db, row));
+    .all(workerId) as AssignmentRow[]).map((row) => publicAssignment(db, row, true));
   const rewardRequests = (db
     .prepare("SELECT * FROM reward_requests WHERE worker_id = ? ORDER BY updated_at DESC LIMIT 50")
     .all(workerId) as RewardRequestRow[]).map((row) => publicRewardRequest(row));
@@ -1740,12 +1866,16 @@ export function getAdminState() {
   `).all() as Array<RewardRequestRow & { worker_name: string }>;
   const rewardRequests = rewardRequestRows.map((row) => publicRewardRequest(row, row.worker_name));
   const tasks = (db
-    .prepare("SELECT * FROM tasks ORDER BY created_at DESC")
+    .prepare("SELECT * FROM tasks ORDER BY (status = 'published') DESC, updated_at DESC")
     .all() as TaskRow[]).map((row) => ({
     ...publicTask(db, row),
     assignmentCount: assignmentRows.filter((assignment) => assignment.task_id === row.id && assignment.status !== "cancelled").length,
     assignedWorkerIds: assignmentRows
-      .filter((assignment) => assignment.task_id === row.id && assignment.status !== "cancelled")
+      .filter((assignment) => assignment.task_id === row.id && (
+        row.repeatable
+          ? ["claimed", "in_progress", "submitted", "revision_requested"].includes(assignment.status)
+          : assignment.status !== "cancelled"
+      ))
       .map((assignment) => assignment.worker_id),
   }));
   const activities = (db

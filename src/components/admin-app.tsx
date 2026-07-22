@@ -75,6 +75,13 @@ type TaskRewardDraft = {
   probabilityPercent: number;
 };
 
+function toDateTimeLocal(value: number | null) {
+  if (!value) return "";
+  const date = new Date(value);
+  const offset = date.getTimezoneOffset() * 60_000;
+  return new Date(value - offset).toISOString().slice(0, 16);
+}
+
 const assignmentStatusLabels: Record<Assignment["status"], string> = {
   claimed: "已参加",
   in_progress: "进行中",
@@ -514,6 +521,8 @@ function PublishPanel({
   const [excellentRewards, setExcellentRewards] = useState<TaskRewardDraft[]>([]);
   const [dueValue, setDueValue] = useState("");
   const [assignNow, setAssignNow] = useState(false);
+  const [repeatable, setRepeatable] = useState(false);
+  const [editingTaskId, setEditingTaskId] = useState<string | null>(null);
   const [formError, setFormError] = useState("");
   const [showTimingHelp, setShowTimingHelp] = useState(false);
 
@@ -521,6 +530,44 @@ function PublishPanel({
     setTitle(preset.title);
     setDescription(preset.description);
     setRewardMinutes(String(preset.minutes));
+  }
+
+  function loadTask(task: Task, copy: boolean) {
+    setEditingTaskId(copy ? null : task.id);
+    setTitle(copy ? `${task.title}（副本）`.slice(0, 60) : task.title);
+    setDescription(task.description);
+    setRewardMinutes(String(task.rewardSeconds / MINUTE));
+    setTargetWorkerId(task.targetWorkerId || "");
+    setTimingMode(task.timingMode);
+    setMinimumMinutes(String((task.minimumDurationSeconds || 10 * MINUTE) / MINUTE));
+    setBonusEnabled(task.bonusEnabled);
+    setExcellentMultiplier(String(task.excellentMultiplier));
+    setBonusCriteria(task.bonusCriteria || "");
+    setNormalRewards(task.rewardBindings.filter((item) => item.grantTier === "normal").map((item) => ({ definitionId: item.definitionId, quantity: item.quantity, probabilityPercent: item.probabilityPercent })));
+    setExcellentRewards(task.rewardBindings.filter((item) => item.grantTier === "excellent_bonus").map((item) => ({ definitionId: item.definitionId, quantity: item.quantity, probabilityPercent: item.probabilityPercent })));
+    setDueValue(toDateTimeLocal(task.dueAt));
+    setRepeatable(task.repeatable);
+    setAssignNow(false);
+    setFormError("");
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  }
+
+  function resetForm() {
+    setEditingTaskId(null);
+    setTitle("");
+    setDescription("");
+    setRewardMinutes("30");
+    setTargetWorkerId("");
+    setTimingMode("optional");
+    setMinimumMinutes("10");
+    setBonusEnabled(false);
+    setExcellentMultiplier("2");
+    setBonusCriteria("");
+    setNormalRewards([]);
+    setExcellentRewards([]);
+    setRepeatable(false);
+    setDueValue("");
+    setAssignNow(false);
   }
 
   async function submit(event: FormEvent) {
@@ -560,7 +607,8 @@ function PublishPanel({
     }
     setFormError("");
     const ok = await mutate({
-      action: "create_task",
+      action: editingTaskId ? "update_task" : "create_task",
+      ...(editingTaskId ? { taskId: editingTaskId } : {}),
       title,
       description,
       rewardSeconds: rewardMinutesNumber * MINUTE,
@@ -576,25 +624,19 @@ function PublishPanel({
           ? excellentRewards.map((item) => ({ ...item, grantTier: "excellent_bonus" as const }))
           : []),
       ],
+      repeatable,
       dueAt,
-      assignNow: Boolean(assignNow && targetWorkerId),
-    }, "任务发布成功");
+      assignNow: Boolean(!editingTaskId && assignNow && targetWorkerId),
+    }, editingTaskId ? "任务修改已保存；已参加的轮次仍使用原规则" : "任务发布成功");
     if (ok) {
-      setTitle("");
-      setDescription("");
-      setBonusEnabled(false);
-      setExcellentMultiplier("2");
-      setBonusCriteria("");
-      setNormalRewards([]);
-      setExcellentRewards([]);
-      setAssignNow(false);
+      resetForm();
     }
   }
 
   return (
     <div className="space-y-6">
       <section>
-        <SectionTitle title="发布奖励任务" text="先用快捷项填充，再按需要修改" />
+        <SectionTitle title={editingTaskId ? "编辑奖励任务" : "发布奖励任务"} text={editingTaskId ? "修改只影响之后参加的新一轮，已有记录保持不变" : "先用快捷项填充，再按需要修改"} />
         <div className="grid grid-cols-3 gap-2 sm:grid-cols-6">
           {taskPresets.map((preset) => {
             const Icon = preset.icon;
@@ -609,6 +651,7 @@ function PublishPanel({
       </section>
 
       <form onSubmit={submit} className="app-card space-y-4 p-4 sm:p-6">
+        {editingTaskId && <div className="flex items-center justify-between gap-3 rounded-2xl bg-blue-50 px-4 py-3 text-sm font-black text-blue-800"><span>正在编辑现有任务</span><button type="button" className="secondary-button !min-h-9 !px-3" onClick={resetForm}>取消编辑</button></div>}
         <label>
           <span className="label">任务名称</span>
           <input className="field" value={title} onChange={(event) => setTitle(event.target.value)} placeholder="例如：读书 30 分钟" required maxLength={60} />
@@ -674,6 +717,10 @@ function PublishPanel({
           />
           开启优秀完成奖励
         </label>
+        <label className="flex min-h-13 items-start gap-3 rounded-2xl bg-blue-50 px-4 py-3 font-black text-blue-900">
+          <input className="mt-0.5 h-5 w-5 accent-purple-600" type="checkbox" checked={repeatable} onChange={(event) => setRepeatable(event.target.checked)} />
+          <span>允许重复参与<span className="mt-1 block text-xs font-semibold leading-5 text-blue-700">上一轮通过、未通过或取消后，可以再参加新一轮；不能同时参加多轮。</span></span>
+        </label>
         {bonusEnabled && (
           <div className="grid gap-3 sm:grid-cols-[160px_1fr]">
             <label>
@@ -693,7 +740,7 @@ function PublishPanel({
         <TaskRewardBindingEditor
           title="普通奖励券"
           text="正常完成和优秀完成都会参与；每张券按自己的概率独立判定。"
-          definitions={state.rewardDefinitions.filter((definition) => definition.isActive)}
+          definitions={state.rewardDefinitions.filter((definition) => definition.isActive || normalRewards.some((item) => item.definitionId === definition.id))}
           items={normalRewards}
           onChange={setNormalRewards}
         />
@@ -701,7 +748,7 @@ function PublishPanel({
           <TaskRewardBindingEditor
             title="优秀额外奖励券"
             text="只有审核为优秀完成时参与，普通奖励券不会跟随基础时数倍率增加。"
-            definitions={state.rewardDefinitions.filter((definition) => definition.isActive)}
+            definitions={state.rewardDefinitions.filter((definition) => definition.isActive || excellentRewards.some((item) => item.definitionId === definition.id))}
             items={excellentRewards}
             onChange={setExcellentRewards}
             tone="amber"
@@ -726,27 +773,27 @@ function PublishPanel({
           />
         </div>
         {formError && <p className="rounded-xl bg-red-50 px-3 py-2 text-sm font-bold text-red-700">{formError}</p>}
-        {targetWorkerId && (
+        {targetWorkerId && !editingTaskId && (
           <label className="flex items-center gap-3 rounded-2xl bg-blue-50 px-4 py-3 text-sm font-black text-blue-800">
             <input className="h-5 w-5" type="checkbox" checked={assignNow} onChange={(event) => setAssignNow(event.target.checked)} />
             发布后直接分配给这个打工人
           </label>
         )}
         <button className="primary-button w-full" disabled={busy || !title.trim() || !Number.isInteger(Number(rewardMinutes)) || Number(rewardMinutes) < 1 || Number(rewardMinutes) > 1440 || (timingMode === "required" && (!Number.isInteger(Number(minimumMinutes)) || Number(minimumMinutes) < 1 || Number(minimumMinutes) > 1440)) || (bonusEnabled && (!bonusCriteria.trim() || !Number.isFinite(Number(excellentMultiplier)) || Number(excellentMultiplier) < 1))}>
-          <Send className="mr-2 inline" size={19} /> {busy ? "正在发布…" : "发布任务"}
+          <Send className="mr-2 inline" size={19} /> {busy ? "正在保存…" : editingTaskId ? "保存修改" : "发布任务"}
         </button>
       </form>
 
       {showTimingHelp && <TimingHelpDialog onClose={() => setShowTimingHelp(false)} />}
 
       <section>
-        <SectionTitle title="已发布任务" text="有人参加后，奖励规则会保持不变" />
+        <SectionTitle title="任务列表" text="默认折叠；可以编辑、复制、关闭或重新开启" />
         {state.tasks.length === 0 ? (
           <EmptyState title="还没有任务" text="从上面的快捷任务开始发布吧。" />
         ) : (
           <div className="space-y-3">
             {state.tasks.map((task) => (
-              <TaskAdminCard key={task.id} task={task} workers={state.workers} mutate={mutate} busy={busy} />
+              <TaskAdminCard key={task.id} task={task} workers={state.workers} mutate={mutate} busy={busy} onEdit={() => loadTask(task, false)} onCopy={() => loadTask(task, true)} />
             ))}
           </div>
         )}
@@ -958,27 +1005,35 @@ function TaskAdminCard({
   workers,
   mutate,
   busy,
+  onEdit,
+  onCopy,
 }: {
   task: Task;
   workers: AdminWorker[];
   mutate: (body: Record<string, unknown>, success: string) => Promise<boolean>;
   busy: boolean;
+  onEdit: () => void;
+  onCopy: () => void;
 }) {
   const [assignWorker, setAssignWorker] = useState("");
   const availableWorkers = workers.filter((worker) => worker.isActive && !(task.assignedWorkerIds || []).includes(worker.id) && (!task.targetWorkerId || task.targetWorkerId === worker.id));
   return (
-    <div className={`app-card p-4 ${task.status === "closed" ? "opacity-65" : ""}`}>
-      <div className="flex items-start justify-between gap-3">
-        <div className="min-w-0">
+    <details className="app-card group overflow-hidden">
+      <summary className="flex min-h-20 cursor-pointer list-none items-center gap-3 p-4 [&::-webkit-details-marker]:hidden">
+        <div className={`min-w-0 flex-1 ${task.status === "closed" ? "opacity-65" : ""}`}>
           <div className="flex flex-wrap items-center gap-2">
-            <h3 className="font-black">{task.title}</h3>
-            {task.bonusEnabled && <span className="pill bg-amber-100 text-amber-800">优秀 ×{task.excellentMultiplier}</span>}
+            <h3 className="truncate font-black">{task.title}</h3>
+            {task.repeatable && <span className="pill bg-blue-100 text-blue-700">可重复</span>}
             <span className={`pill ${task.status === "published" ? "bg-emerald-100 text-emerald-700" : "bg-slate-100 text-slate-500"}`}>{task.status === "published" ? "发布中" : "已关闭"}</span>
           </div>
-          <p className="mt-1 text-sm font-semibold leading-6 text-slate-500">{task.description || "没有额外说明"}</p>
+          <p className="mt-1 truncate text-xs font-bold text-slate-500">已参加 {task.assignmentCount || 0} 次 · {task.targetWorkerId ? workers.find((worker) => worker.id === task.targetWorkerId)?.name || "指定角色" : "全部打工人"}</p>
         </div>
         <div className="shrink-0 text-sm text-purple-700"><TimeCoin seconds={task.rewardSeconds} compact /></div>
-      </div>
+        <span className="text-lg font-black text-slate-400 transition group-open:rotate-180">⌄</span>
+      </summary>
+      <div className="border-t border-slate-100 p-4 pt-3">
+      <p className="text-sm font-semibold leading-6 text-slate-500">{task.description || "没有额外说明"}</p>
+      {task.bonusEnabled && <span className="pill mt-2 bg-amber-100 text-amber-800">优秀 ×{task.excellentMultiplier}</span>}
       <div className="mt-3">
         <TaskRewardSummary
           baseRewardSeconds={task.rewardSeconds}
@@ -988,26 +1043,36 @@ function TaskAdminCard({
         />
       </div>
       <div className="mt-3 flex flex-wrap gap-2 text-xs font-bold text-slate-500">
-        <span>已参加 {task.assignmentCount || 0}</span>
+        <span>累计参与 {task.assignmentCount || 0} 次</span>
         <span>·</span>
         <span>{task.targetWorkerId ? workers.find((worker) => worker.id === task.targetWorkerId)?.name || "指定角色" : "全部打工人"}</span>
         {task.dueAt && <><span>·</span><span>截止 {formatDateTime(task.dueAt)}</span></>}
       </div>
-      {task.status === "published" && (
-        <div className="mt-3 flex flex-col gap-2 sm:flex-row">
-          {availableWorkers.length > 0 && (
-            <div className="flex flex-1 gap-2">
-              <select className="field !min-h-11 flex-1" value={assignWorker} onChange={(event) => setAssignWorker(event.target.value)}>
-                <option value="">选择代分配对象</option>
-                {availableWorkers.map((worker) => <option key={worker.id} value={worker.id}>{worker.name}</option>)}
-              </select>
-              <button className="secondary-button !min-h-11 !px-3" disabled={busy || !assignWorker} onClick={() => mutate({ action: "assign_task", taskId: task.id, workerId: assignWorker }, "任务已分配")}>分配</button>
-            </div>
-          )}
-          <button className="danger-button !min-h-11 !px-3" disabled={busy} onClick={() => mutate({ action: "close_task", taskId: task.id }, "任务已关闭")}>关闭</button>
+      <div className="mt-3 flex flex-col gap-2">
+        {task.status === "published" && availableWorkers.length > 0 && (
+          <div className="flex gap-2">
+            <select className="field !min-h-11 flex-1" value={assignWorker} onChange={(event) => setAssignWorker(event.target.value)}>
+              <option value="">选择代分配对象</option>
+              {availableWorkers.map((worker) => <option key={worker.id} value={worker.id}>{worker.name}</option>)}
+            </select>
+            <button className="secondary-button !min-h-11 !px-3" disabled={busy || !assignWorker} onClick={() => mutate({ action: "assign_task", taskId: task.id, workerId: assignWorker }, "任务已分配")}>分配</button>
+          </div>
+        )}
+        <div className="grid grid-cols-3 gap-2">
+          <button type="button" className="secondary-button !min-h-11 !px-2" disabled={busy} onClick={onEdit}>编辑</button>
+          <button type="button" className="secondary-button !min-h-11 !px-2" disabled={busy} onClick={onCopy}>复制编辑</button>
+          <button
+            type="button"
+            className={task.status === "published" ? "danger-button !min-h-11 !px-2" : "primary-button !min-h-11 !px-2"}
+            disabled={busy}
+            onClick={() => mutate({ action: "set_task_status", taskId: task.id, status: task.status === "published" ? "closed" : "published" }, task.status === "published" ? "任务已关闭" : "任务已重新开启")}
+          >
+            {task.status === "published" ? "关闭" : "重新开启"}
+          </button>
         </div>
-      )}
-    </div>
+      </div>
+      </div>
+    </details>
   );
 }
 

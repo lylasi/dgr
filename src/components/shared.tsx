@@ -143,10 +143,12 @@ export function TaskRewardList({
   items,
   showOutcomes = false,
   emptyText = "未配置奖励券",
+  workerPreview = false,
 }: {
   items: TaskRewardDisplayItem[];
   showOutcomes?: boolean;
   emptyText?: string;
+  workerPreview?: boolean;
 }) {
   if (items.length === 0) {
     return <p className="rounded-xl bg-white/65 px-3 py-2 text-xs font-bold text-slate-500">{emptyText}</p>;
@@ -155,6 +157,22 @@ export function TaskRewardList({
     <div className="space-y-2">
       {items.map((item) => {
         const awardedQuantity = "awardedQuantity" in item ? item.awardedQuantity : null;
+        const mystery = item.isMystery || (workerPreview && item.probabilityPercent > 0 && item.probabilityPercent < 100);
+        if (mystery) {
+          return (
+            <div
+              key={`${item.grantTier}:mystery:${"bindingId" in item ? item.bindingId : item.id}`}
+              className="flex items-center gap-3 rounded-2xl bg-white/80 p-3"
+              aria-label="可能获得神秘奖励券"
+            >
+              <RewardVisual icon="sparkles" theme={item.grantTier === "excellent_bonus" ? "orange" : "purple"} size={48} />
+              <div className="min-w-0 flex-1">
+                <p className="font-black text-slate-800">可能获得神秘奖励券</p>
+                <p className="mt-1 text-xs font-bold text-slate-500">完成并审核后揭晓</p>
+              </div>
+            </div>
+          );
+        }
         return (
           <div
             key={`${item.grantTier}:${"bindingId" in item ? item.bindingId : item.id}`}
@@ -167,13 +185,13 @@ export function TaskRewardList({
                 <span className="pill bg-purple-100 text-purple-700">× {item.quantity}</span>
               </div>
               <p className="mt-1 text-xs font-bold text-slate-600">{taskRewardValue(item)}</p>
-              <p className="mt-1 text-xs font-black text-purple-700">
+              {!showOutcomes && <p className="mt-1 text-xs font-black text-purple-700">
                 {item.probabilityPercent === 100
-                  ? "100% 必得"
+                  ? workerPreview ? "完成必得" : "100% 必得"
                   : item.quantity > 1
                     ? `每张独立 ${item.probabilityPercent}% 概率`
                     : `${item.probabilityPercent}% 概率`}
-              </p>
+              </p>}
               {item.kind === "physical" && item.fulfillmentInstructions && (
                 <p className="mt-1 text-xs font-semibold leading-5 text-slate-500">交付：{item.fulfillmentInstructions}</p>
               )}
@@ -306,6 +324,7 @@ export function TaskRewardSummary({
   items,
   showOutcomes = false,
   reviewTier = null,
+  workerPreview = false,
 }: {
   baseRewardSeconds: number;
   excellentMultiplier: number;
@@ -313,9 +332,17 @@ export function TaskRewardSummary({
   items: TaskRewardDisplayItem[];
   showOutcomes?: boolean;
   reviewTier?: "normal" | "excellent" | null;
+  workerPreview?: boolean;
 }) {
-  const normalItems = items.filter((item) => item.grantTier === "normal");
-  const excellentItems = items.filter((item) => item.grantTier === "excellent_bonus");
+  const previewItems = (tier: TaskRewardDisplayItem["grantTier"]) => {
+    const tierItems = items.filter((item) => item.grantTier === tier);
+    if (!workerPreview) return tierItems;
+    const certain = tierItems.filter((item) => item.probabilityPercent === 100 && !item.isMystery);
+    const mystery = tierItems.find((item) => (item.probabilityPercent > 0 && item.probabilityPercent < 100) || item.isMystery);
+    return mystery ? [...certain, mystery] : certain;
+  };
+  const normalItems = previewItems("normal");
+  const excellentItems = previewItems("excellent_bonus");
   return (
     <div className="space-y-3 rounded-2xl bg-slate-50 p-3">
       <div className={`grid gap-2 ${bonusEnabled ? "grid-cols-2" : "grid-cols-1"}`}>
@@ -334,14 +361,16 @@ export function TaskRewardSummary({
           </div>
         )}
       </div>
-      <div>
-        <div className="mb-2 flex flex-wrap items-baseline justify-between gap-1">
-          <p className="text-sm font-black text-slate-800">普通奖励券</p>
-          <p className="text-[11px] font-bold text-slate-500">正常、优秀都会参与</p>
+      {normalItems.length > 0 && (
+        <div>
+          <div className="mb-2 flex flex-wrap items-baseline justify-between gap-1">
+            <p className="text-sm font-black text-slate-800">普通奖励券</p>
+            <p className="text-[11px] font-bold text-slate-500">正常、优秀都会参与</p>
+          </div>
+          <TaskRewardList items={normalItems} showOutcomes={showOutcomes} workerPreview={workerPreview} />
         </div>
-        <TaskRewardList items={normalItems} showOutcomes={showOutcomes} emptyText="没有普通奖励券" />
-      </div>
-      {bonusEnabled && (
+      )}
+      {bonusEnabled && excellentItems.length > 0 && (
         <div>
           <div className="mb-2 flex flex-wrap items-baseline justify-between gap-1">
             <p className="text-sm font-black text-amber-900">优秀额外奖励券</p>
@@ -349,7 +378,7 @@ export function TaskRewardSummary({
               {reviewTier === "normal" ? "本次正常完成，未参与" : "仅优秀完成参与"}
             </p>
           </div>
-          <TaskRewardList items={excellentItems} showOutcomes={showOutcomes} emptyText="没有优秀额外奖励券" />
+          <TaskRewardList items={excellentItems} showOutcomes={showOutcomes} workerPreview={workerPreview} />
         </div>
       )}
     </div>

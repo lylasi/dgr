@@ -74,6 +74,7 @@ export function WorkerApp({
   const [tab, setTab] = useState<WorkerTab>("home");
   const [busy, setBusy] = useState(false);
   const [showRewardRequest, setShowRewardRequest] = useState(false);
+  const [showTaskPicker, setShowTaskPicker] = useState(false);
   const [toast, setToast] = useState<{ message: string; tone: "success" | "error" } | null>(null);
 
   const load = useCallback(async (quiet = false) => {
@@ -162,7 +163,7 @@ export function WorkerApp({
       />
       <main className="page-enter mx-auto w-full max-w-3xl px-4 pb-8 sm:px-6">
         {tab === "home" && <WorkerHome state={state} mutate={mutate} busy={busy} setTab={setTab} onOpenRewardRequest={() => setShowRewardRequest(true)} />}
-        {tab === "tasks" && <TasksPanel state={state} mutate={mutate} busy={busy} onOpenRewardRequest={() => setShowRewardRequest(true)} />}
+        {tab === "tasks" && <TasksPanel state={state} mutate={mutate} busy={busy} onOpenRewardRequest={() => setShowRewardRequest(true)} onOpenTaskPicker={() => setShowTaskPicker(true)} />}
         {tab === "running" && <RunningPanel state={state} mutate={mutate} busy={busy} setTab={setTab} />}
         {tab === "rewards" && <RewardsPanel state={state} mutateReward={mutateReward} busy={busy} />}
         {tab === "ledger" && <LedgerPanel state={state} />}
@@ -183,6 +184,17 @@ export function WorkerApp({
           mutate={mutate}
           busy={busy}
           onClose={() => setShowRewardRequest(false)}
+        />
+      )}
+      {showTaskPicker && (
+        <AvailableTasksDialog
+          tasks={state.availableTasks}
+          busy={busy}
+          claim={async (task) => {
+            const ok = await mutate({ action: "claim_task", taskId: task.id }, "任务参加成功，加油完成吧");
+            if (ok) setShowTaskPicker(false);
+          }}
+          onClose={() => setShowTaskPicker(false)}
         />
       )}
     </div>
@@ -553,11 +565,13 @@ function TasksPanel({
   mutate,
   busy,
   onOpenRewardRequest,
+  onOpenTaskPicker,
 }: {
   state: WorkerState;
   mutate: (body: Record<string, unknown>, success: string) => Promise<boolean>;
   busy: boolean;
   onOpenRewardRequest: () => void;
+  onOpenTaskPicker: () => void;
 }) {
   const activeAssignments = state.assignments.filter((assignment) => !["approved", "rejected", "cancelled"].includes(assignment.status));
   const recentAssignments = state.assignments
@@ -585,10 +599,20 @@ function TasksPanel({
       </button>
       <section>
         <h2 className="text-xl font-black">可以参加的任务</h2>
-        <p className="mb-3 mt-0.5 text-sm font-semibold text-slate-500">选一个喜欢的任务，认真完成后等管理员审核</p>
-        {state.availableTasks.length === 0 ? <EmptyState title="暂时没有新任务" text="管理员发布新任务后，就会出现在这里。" /> : (
-          <div className="space-y-3">{state.availableTasks.map((task) => <AvailableTaskCard key={task.id} task={task} busy={busy} claim={() => mutate({ action: "claim_task", taskId: task.id }, "任务参加成功，加油完成吧")} />)}</div>
-        )}
+        <p className="mb-3 mt-0.5 text-sm font-semibold text-slate-500">从任务库里挑一项参加</p>
+        <button
+          type="button"
+          className="app-card flex w-full items-center gap-3 p-4 text-left"
+          disabled={state.availableTasks.length === 0}
+          onClick={onOpenTaskPicker}
+        >
+          <div className="grid h-11 w-11 shrink-0 place-items-center rounded-2xl bg-blue-100 text-blue-700"><ListChecks size={23} /></div>
+          <div className="min-w-0 flex-1">
+            <p className="font-black">{state.availableTasks.length > 0 ? `${state.availableTasks.length} 个任务可以参加` : "暂时没有新任务"}</p>
+            <p className="mt-0.5 truncate text-xs font-bold text-slate-500">{state.availableTasks.length > 0 ? state.availableTasks.slice(0, 3).map((task) => task.title).join(" · ") : "管理员发布后会出现在这里"}</p>
+          </div>
+          {state.availableTasks.length > 0 && <span className="shrink-0 text-sm font-black text-purple-700">选择</span>}
+        </button>
       </section>
       <section>
         <h2 className="mb-3 text-xl font-black">我的任务</h2>
@@ -636,11 +660,42 @@ function TasksPanel({
   );
 }
 
+function AvailableTasksDialog({
+  tasks,
+  busy,
+  claim,
+  onClose,
+}: {
+  tasks: Task[];
+  busy: boolean;
+  claim: (task: Task) => Promise<void>;
+  onClose: () => void;
+}) {
+  useEffect(() => {
+    const closeOnEscape = (event: KeyboardEvent) => { if (event.key === "Escape") onClose(); };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [onClose]);
+  return (
+    <div className="fixed inset-0 z-[70] flex items-end justify-center bg-slate-900/45 p-3 sm:items-center sm:p-6" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
+      <section className="page-enter max-h-[88vh] w-full max-w-lg overflow-y-auto rounded-[28px] bg-white p-5 shadow-2xl sm:p-6" role="dialog" aria-modal="true" aria-labelledby="available-tasks-title">
+        <div className="flex items-start justify-between gap-3">
+          <div><p className="text-xs font-black text-purple-600">参加任务</p><h2 id="available-tasks-title" className="mt-0.5 text-xl font-black">选择一个任务</h2><p className="mt-1 text-sm font-semibold text-slate-500">参加后会进入“我的任务”</p></div>
+          <button type="button" className="grid h-10 w-10 shrink-0 place-items-center rounded-full bg-slate-100 text-slate-600" aria-label="关闭任务选择" onClick={onClose}><XCircle size={20} /></button>
+        </div>
+        <div className="mt-4 space-y-3">
+          {tasks.map((task) => <AvailableTaskCard key={task.id} task={task} busy={busy} claim={() => void claim(task)} />)}
+        </div>
+      </section>
+    </div>
+  );
+}
+
 function AvailableTaskCard({ task, busy, claim }: { task: Task; busy: boolean; claim: () => void }) {
   return (
     <div className="app-card p-4">
       <div className="flex items-start justify-between gap-3">
-        <div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><h3 className="font-black">{task.title}</h3>{task.bonusEnabled && <span className="pill bg-amber-100 text-amber-800"><Sparkles size={14} />优秀 ×{task.excellentMultiplier}</span>}</div><p className="mt-1 text-sm font-semibold leading-6 text-slate-500">{task.description || "完成这个任务后提交管理员审核"}</p></div>
+        <div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><h3 className="font-black">{task.title}</h3>{task.repeatable && <span className="pill bg-blue-100 text-blue-700">可重复</span>}{task.bonusEnabled && <span className="pill bg-amber-100 text-amber-800"><Sparkles size={14} />优秀 ×{task.excellentMultiplier}</span>}</div><p className="mt-1 text-sm font-semibold leading-6 text-slate-500">{task.description || "完成这个任务后提交管理员审核"}</p></div>
         <div className="shrink-0 text-sm text-purple-700"><TimeCoin seconds={task.rewardSeconds} compact /></div>
       </div>
       {task.bonusCriteria && <p className="mt-3 rounded-xl bg-amber-50 px-3 py-2 text-sm font-bold text-amber-800">优秀标准：{task.bonusCriteria}</p>}
@@ -650,6 +705,7 @@ function AvailableTaskCard({ task, busy, claim }: { task: Task; busy: boolean; c
           excellentMultiplier={task.excellentMultiplier}
           bonusEnabled={task.bonusEnabled}
           items={task.rewardBindings}
+          workerPreview
         />
       </div>
       <div className="mt-3 flex items-center justify-between gap-3"><span className="text-xs font-bold text-slate-500">{task.timingMode === "required" ? `需计时至少 ${formatDuration(task.minimumDurationSeconds || 0, false)}` : task.timingMode === "optional" ? "可以记录计时" : "不需要计时"}{task.dueAt ? ` · ${formatDateTime(task.dueAt)} 截止` : ""}</span><button className="primary-button shrink-0 !min-h-11 !px-4" disabled={busy} onClick={claim}>参加</button></div>
@@ -698,6 +754,7 @@ function AssignmentCard({
           excellentMultiplier={assignment.excellentMultiplier}
           bonusEnabled={assignment.bonusEnabled}
           items={assignment.rewardItems}
+          workerPreview
         />
         {assignment.dueAt && <p className="text-xs font-bold text-slate-500">截止时间：{formatDateTime(assignment.dueAt)}</p>}
         {assignment.status === "revision_requested" && assignment.reviewNote && <p className="rounded-xl bg-amber-50 px-3 py-2 text-sm font-bold text-amber-800">管理员说：{assignment.reviewNote}</p>}
@@ -819,6 +876,7 @@ function RunningPanel({ state, mutate, busy, setTab }: { state: WorkerState; mut
                   excellentMultiplier={activeAssignment.excellentMultiplier}
                   bonusEnabled={activeAssignment.bonusEnabled}
                   items={activeAssignment.rewardItems}
+                  workerPreview
                 />
               </div>
             </div>

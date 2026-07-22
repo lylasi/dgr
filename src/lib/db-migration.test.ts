@@ -1,6 +1,6 @@
 import Database from "better-sqlite3";
 import { describe, expect, it } from "vitest";
-import { migrateRewardSchema, migrateTaskRewardSchema } from "@/lib/db";
+import { migrateRepeatableTaskSchema, migrateRewardSchema, migrateTaskRewardSchema } from "@/lib/db";
 
 describe("reward database migration", () => {
   it("preserves legacy transaction rows while extending the constrained type", () => {
@@ -146,9 +146,12 @@ describe("reward database migration", () => {
     `);
 
     migrateTaskRewardSchema(db, 3);
+    migrateRepeatableTaskSchema(db, 4);
 
     expect(db.prepare("SELECT excellent_multiplier_bps FROM tasks WHERE id = ?")
       .get("legacy-task")).toEqual({ excellent_multiplier_bps: 20_000 });
+    expect(db.prepare("SELECT repeatable FROM tasks WHERE id = ?")
+      .get("legacy-task")).toEqual({ repeatable: 0 });
     expect(db.prepare(`
       SELECT review_multiplier, review_tier, approved_reward_grant_id, excellent_multiplier_bps
       FROM task_assignments WHERE id = ?
@@ -158,6 +161,8 @@ describe("reward database migration", () => {
       approved_reward_grant_id: null,
       excellent_multiplier_bps: 20_000,
     });
+    expect(db.prepare("SELECT participation_number FROM task_assignments WHERE id = ?")
+      .get("legacy-assignment")).toEqual({ participation_number: 1 });
     expect(() => db.prepare("UPDATE task_assignments SET review_multiplier = 3.5 WHERE id = ?")
       .run("legacy-assignment")).not.toThrow();
     expect(db.prepare("SELECT assignment_id FROM legacy_assignment_children").get())
@@ -165,6 +170,8 @@ describe("reward database migration", () => {
     expect(db.pragma("foreign_key_check")).toEqual([]);
     expect(db.prepare("SELECT version FROM schema_migrations WHERE version = 7").get())
       .toEqual({ version: 7 });
+    expect(db.prepare("SELECT version FROM schema_migrations WHERE version = 8").get())
+      .toEqual({ version: 8 });
     db.close();
   });
 });

@@ -149,6 +149,46 @@ describe.sequential("SQLite business flow", () => {
     expect(getWorkerState(workerId).worker.balanceSeconds).toBe(3 * HOUR);
   });
 
+  it("starts a new preserved round only for repeatable tasks", () => {
+    const repeatableTaskId = createTask({
+      title: "每日阅读",
+      description: "可以每天完成一轮",
+      rewardSeconds: 10 * MINUTE,
+      targetWorkerId: workerId,
+      timingMode: "none",
+      bonusEnabled: false,
+      repeatable: true,
+      requestId: "test-repeatable-task",
+    });
+    const firstRoundId = claimTask(workerId, repeatableTaskId, "test-repeatable-claim-one");
+    submitAssignment({
+      workerId,
+      assignmentId: firstRoundId,
+      note: "第一轮完成",
+      actor: `worker:${workerId}`,
+      requestId: "test-repeatable-submit-one",
+    });
+    reviewAssignment({
+      assignmentId: firstRoundId,
+      decision: "reject",
+      note: "第一轮结束",
+      requestId: "test-repeatable-review-one",
+    });
+
+    expect(getWorkerState(workerId).availableTasks.some((task) => task.id === repeatableTaskId)).toBe(true);
+    const secondRoundId = claimTask(workerId, repeatableTaskId, "test-repeatable-claim-two");
+    expect(secondRoundId).not.toBe(firstRoundId);
+    expect(getDb().prepare(`
+      SELECT participation_number FROM task_assignments
+      WHERE task_id = ? ORDER BY participation_number
+    `).all(repeatableTaskId)).toEqual([
+      { participation_number: 1 },
+      { participation_number: 2 },
+    ]);
+    expect(getWorkerState(workerId).availableTasks.some((task) => task.id === repeatableTaskId)).toBe(false);
+    expect(getWorkerState(workerId).assignments.filter((assignment) => assignment.taskId === repeatableTaskId)).toHaveLength(2);
+  });
+
   it("lets a worker submit an ad-hoc reward for admin review", async () => {
     const requestWorkerId = await createWorker({
       name: "自主申报测试员",
@@ -730,7 +770,7 @@ describe.sequential("SQLite business flow", () => {
   it("returns a complete administrator dashboard", () => {
     const dashboard = getAdminState();
     expect(dashboard.workers).toHaveLength(3);
-    expect(dashboard.tasks).toHaveLength(2);
+    expect(dashboard.tasks).toHaveLength(3);
     expect(dashboard.reviews).toHaveLength(0);
   });
 });

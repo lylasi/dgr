@@ -30,6 +30,7 @@ export type Task = {
   bonusCriteria: string | null;
   availableFrom: number | null;
   dueAt: number | null;
+  repeatable: boolean;
   status: "published" | "closed";
   createdAt: number;
   rewardBindings: TaskRewardBinding[];
@@ -124,6 +125,7 @@ export type TaskRewardBinding = RewardDefinition & {
   grantTier: "normal" | "excellent_bonus";
   quantity: number;
   probabilityPercent: number;
+  isMystery?: boolean;
 };
 
 export type AssignmentRewardItem = {
@@ -146,6 +148,7 @@ export type AssignmentRewardItem = {
   imageUrl: string | null;
   outcomeCount: number;
   awardedQuantity: number | null;
+  isMystery?: boolean;
 };
 
 export type RewardItem = {
