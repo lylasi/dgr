@@ -119,6 +119,15 @@ export type RewardDefinition = {
   updatedAt: number;
 };
 
+export type AdminRewardDefinition = RewardDefinition & {
+  canDelete: boolean;
+  usage: {
+    taskBindingCount: number;
+    assignmentSnapshotCount: number;
+    issuedRewardCount: number;
+  };
+};
+
 export type TaskRewardBinding = RewardDefinition & {
   bindingId: string;
   definitionId: string;
@@ -263,7 +272,7 @@ export type AdminState = {
   activities: Activity[];
   transactions: Transaction[];
   rewardSystemEnabled: boolean;
-  rewardDefinitions: RewardDefinition[];
+  rewardDefinitions: AdminRewardDefinition[];
   rewardItems: RewardItem[];
   dailyCouponSettings: DailyCouponSetting[];
   dailyCouponGrants: DailyCouponGrant[];

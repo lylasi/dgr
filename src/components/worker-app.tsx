@@ -174,7 +174,7 @@ export function WorkerApp({
         onSwitch={onSwitch}
       />
       <main className="page-enter mx-auto w-full max-w-3xl px-4 pb-8 sm:px-6">
-        {tab === "home" && <WorkerHome state={state} mutate={mutate} busy={busy} setTab={setTab} onOpenRewardRequest={() => setShowRewardRequest(true)} onOpenTaskDetail={(assignment) => setDetailAssignmentId(assignment.id)} />}
+        {tab === "home" && <WorkerHome state={state} mutate={mutate} busy={busy} onOpenTaskPicker={() => setShowTaskPicker(true)} onOpenRewardRequest={() => setShowRewardRequest(true)} onOpenTaskDetail={(assignment) => setDetailAssignmentId(assignment.id)} />}
         {tab === "tasks" && <TasksPanel state={state} mutate={mutate} busy={busy} onOpenRewardRequest={() => setShowRewardRequest(true)} onOpenTaskPicker={() => setShowTaskPicker(true)} onOpenTaskDetail={(assignment) => setDetailAssignmentId(assignment.id)} />}
         {tab === "rewards" && <RewardsPanel state={state} mutateReward={mutateReward} busy={busy} />}
         {tab === "ledger" && <LedgerPanel state={state} onOpenTaskDetail={(assignment) => setDetailAssignmentId(assignment.id)} />}
@@ -297,14 +297,14 @@ function WorkerHome({
   state,
   mutate,
   busy,
-  setTab,
+  onOpenTaskPicker,
   onOpenRewardRequest,
   onOpenTaskDetail,
 }: {
   state: WorkerState;
   mutate: (body: Record<string, unknown>, success: string) => Promise<boolean>;
   busy: boolean;
-  setTab: (tab: WorkerTab) => void;
+  onOpenTaskPicker: () => void;
   onOpenRewardRequest: () => void;
   onOpenTaskDetail: (assignment: Assignment) => void;
 }) {
@@ -354,7 +354,7 @@ function WorkerHome({
         </section>
       )}
 
-      <button className="app-card flex w-full items-center gap-3 bg-blue-50 p-4 text-left" onClick={() => setTab("tasks")}><div className="grid h-12 w-12 shrink-0 place-items-center rounded-2xl bg-blue-100 text-blue-700"><ListChecks size={26} /></div><div className="min-w-0 flex-1"><strong className="block">打工任务</strong><span className="text-xs font-bold text-slate-500">{state.availableTasks.length} 个可参加 · {state.assignments.filter((item) => ["claimed", "in_progress", "submitted", "revision_requested"].includes(item.status)).length} 个进行中</span></div><span className="text-sm font-black text-purple-700">打开</span></button>
+      <button type="button" className="app-card flex w-full items-center gap-3 bg-blue-50 p-4 text-left" onClick={onOpenTaskPicker}><div className="grid h-12 w-12 shrink-0 place-items-center rounded-2xl bg-blue-100 text-blue-700"><ListChecks size={26} /></div><div className="min-w-0 flex-1"><strong className="block">打工任务</strong><span className="text-xs font-bold text-slate-500">{state.availableTasks.length} 个可参加 · {state.assignments.filter((item) => ["claimed", "in_progress", "submitted", "revision_requested"].includes(item.status)).length} 个进行中</span></div><span className="text-sm font-black text-purple-700">打开</span></button>
 
       <button className="secondary-button w-full" onClick={onOpenRewardRequest}>
         <PenLine className="mr-2 inline" size={19} />自己申报已完成的奖励任务

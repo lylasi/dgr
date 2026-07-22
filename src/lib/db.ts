@@ -503,11 +503,16 @@ CREATE INDEX IF NOT EXISTS idx_reward_requests_status ON reward_requests(status,
 CREATE INDEX IF NOT EXISTS idx_reward_definitions_kind_active ON reward_definitions(kind, is_active, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_reward_images_definition ON reward_definition_images(definition_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_task_reward_bindings_task ON task_reward_bindings(task_id, grant_tier, sort_order);
+CREATE INDEX IF NOT EXISTS idx_task_reward_bindings_definition ON task_reward_bindings(definition_id);
 CREATE INDEX IF NOT EXISTS idx_assignment_reward_items_assignment ON assignment_reward_items(assignment_id, grant_tier, sort_order);
+CREATE INDEX IF NOT EXISTS idx_assignment_reward_items_definition ON assignment_reward_items(definition_id);
+CREATE INDEX IF NOT EXISTS idx_assignment_reward_items_image ON assignment_reward_items(image_id);
 CREATE INDEX IF NOT EXISTS idx_assignment_reward_outcomes_item ON assignment_reward_outcomes(assignment_reward_item_id, sequence_number);
 CREATE INDEX IF NOT EXISTS idx_reward_batches_worker_created ON reward_grant_batches(worker_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_reward_items_worker_status ON worker_reward_items(worker_id, status, granted_at DESC);
 CREATE INDEX IF NOT EXISTS idx_reward_items_batch ON worker_reward_items(grant_batch_id);
+CREATE INDEX IF NOT EXISTS idx_reward_items_definition ON worker_reward_items(definition_id);
+CREATE INDEX IF NOT EXISTS idx_reward_items_image ON worker_reward_items(image_id);
 CREATE INDEX IF NOT EXISTS idx_daily_coupon_grants_worker_date ON daily_coupon_grants(worker_id, local_date);
 `;
 

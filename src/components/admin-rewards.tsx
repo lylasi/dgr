@@ -1,19 +1,26 @@
 "use client";
 
 import {
+  ArrowLeft,
   CheckCircle2,
+  ChevronRight,
   Copy,
   Gift,
   ImagePlus,
+  LockKeyhole,
   PauseCircle,
   Plus,
   Power,
+  Search,
   Sparkles,
+  Trash2,
+  X,
   XCircle,
 } from "lucide-react";
 import { type ChangeEvent, type FormEvent, useEffect, useState } from "react";
 import { RewardVisual } from "@/components/shared";
 import type {
+  AdminRewardDefinition,
   AdminState,
   AdminWorker,
   RewardDefinition,
@@ -120,6 +127,15 @@ function definitionValue(definition: RewardDefinition) {
   return definition.physicalDescription;
 }
 
+function definitionUsageText(definition: AdminRewardDefinition) {
+  const parts = [
+    definition.usage.taskBindingCount > 0 ? `${definition.usage.taskBindingCount} 个任务绑定` : null,
+    definition.usage.assignmentSnapshotCount > 0 ? `${definition.usage.assignmentSnapshotCount} 条任务快照` : null,
+    definition.usage.issuedRewardCount > 0 ? `${definition.usage.issuedRewardCount} 张已发奖励券` : null,
+  ].filter(Boolean);
+  return parts.join(" · ") || "已有历史记录关联";
+}
+
 export function RewardSettingsPanel({
   state,
   mutate,
@@ -129,10 +145,37 @@ export function RewardSettingsPanel({
   mutate: Mutate;
   busy: boolean;
 }) {
-  const [kindFilter, setKindFilter] = useState<"all" | RewardKind>("all");
+  const [showLibrary, setShowLibrary] = useState(false);
   const [showForm, setShowForm] = useState(false);
   const [editing, setEditing] = useState<RewardDefinition | null>(null);
-  const filtered = state.rewardDefinitions.filter((definition) => kindFilter === "all" || definition.kind === kindFilter);
+  const [returnToLibraryAfterForm, setReturnToLibraryAfterForm] = useState(false);
+  const activeDefinitionCount = state.rewardDefinitions.filter((definition) => definition.isActive).length;
+  const definitionCounts = {
+    random_time: state.rewardDefinitions.filter((definition) => definition.kind === "random_time").length,
+    fixed_time: state.rewardDefinitions.filter((definition) => definition.kind === "fixed_time").length,
+    physical: state.rewardDefinitions.filter((definition) => definition.kind === "physical").length,
+  };
+
+  function openCreateForm(returnToLibrary = false) {
+    setShowLibrary(false);
+    setEditing(null);
+    setReturnToLibraryAfterForm(returnToLibrary);
+    setShowForm(true);
+  }
+
+  function openEditForm(definition: RewardDefinition) {
+    setShowLibrary(false);
+    setEditing(definition);
+    setReturnToLibraryAfterForm(true);
+    setShowForm(true);
+  }
+
+  function closeForm() {
+    setShowForm(false);
+    setEditing(null);
+    if (returnToLibraryAfterForm) setShowLibrary(true);
+    setReturnToLibraryAfterForm(false);
+  }
 
   return (
     <div className="space-y-6">
@@ -163,53 +206,225 @@ export function RewardSettingsPanel({
       <section>
         <div className="flex items-end justify-between gap-3">
           <RewardSectionTitle title="奖励券模板" text="修改模板只影响以后发放的券，已发券使用自己的快照" />
-          <button className="primary-button mb-3 shrink-0 !min-h-11 !px-3" onClick={() => { setEditing(null); setShowForm(true); }}><Plus size={19} /></button>
+          <button type="button" className="primary-button mb-3 shrink-0 !min-h-11 !px-3" aria-label="创建奖励券模板" onClick={() => openCreateForm()}><Plus size={19} /></button>
         </div>
-        <div className="mb-3 flex gap-2 overflow-x-auto pb-1">
-          {([[
-            "all", "全部",
-          ], ["random_time", "随机"], ["fixed_time", "固定"], ["physical", "实物"]] as const).map(([value, label]) => (
-            <button key={value} className={`min-h-11 shrink-0 rounded-full px-4 text-sm font-black ${kindFilter === value ? "bg-purple-600 text-white" : "bg-white text-slate-600 shadow-sm"}`} onClick={() => setKindFilter(value)}>{label}</button>
-          ))}
-        </div>
-        {filtered.length === 0 ? (
-          <div className="soft-card p-5 text-center text-sm font-bold text-slate-500">还没有这一类模板</div>
-        ) : (
-          <div className="space-y-3">
-            {filtered.map((definition) => (
-              <RewardDefinitionCard
-                key={definition.id}
-                definition={definition}
-                mutate={mutate}
-                busy={busy}
-                onEdit={() => { setEditing(definition); setShowForm(true); }}
-              />
-            ))}
+        <button
+          type="button"
+          className="app-card flex w-full items-center gap-3 p-4 text-left transition hover:border-purple-200 hover:bg-purple-50/40"
+          onClick={() => setShowLibrary(true)}
+        >
+          <div className="grid h-12 w-12 shrink-0 place-items-center rounded-2xl bg-purple-100 text-purple-700">
+            <Gift size={25} strokeWidth={2.7} />
           </div>
-        )}
+          <div className="min-w-0 flex-1">
+            <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+              <p className="font-black">{state.rewardDefinitions.length > 0 ? `${state.rewardDefinitions.length} 个模板` : "还没有模板"}</p>
+              {state.rewardDefinitions.length > 0 && <span className="pill bg-emerald-100 text-emerald-700">启用 {activeDefinitionCount}</span>}
+            </div>
+            {state.rewardDefinitions.length > 0 ? (
+              <p className="mt-1 truncate text-xs font-bold text-slate-500">
+                随机 {definitionCounts.random_time} · 固定 {definitionCounts.fixed_time} · 实物 {definitionCounts.physical}
+              </p>
+            ) : (
+              <p className="mt-1 text-xs font-bold text-slate-500">创建后可在这里搜索和管理</p>
+            )}
+          </div>
+          <span className="shrink-0 text-sm font-black text-purple-700">{state.rewardDefinitions.length > 0 ? "查看全部" : "打开模板库"}</span>
+          <ChevronRight className="shrink-0 text-purple-500" size={19} />
+        </button>
       </section>
 
       <RewardHistoryPanel state={state} mutate={mutate} busy={busy} />
+
+      {showLibrary && (
+        <RewardTemplateLibraryDialog
+          definitions={state.rewardDefinitions}
+          mutate={mutate}
+          busy={busy}
+          onCreate={() => openCreateForm(true)}
+          onEdit={openEditForm}
+          onClose={() => setShowLibrary(false)}
+        />
+      )}
 
       {showForm && (
         <RewardDefinitionDialog
           definition={editing}
           busy={busy}
           mutate={mutate}
-          onClose={() => { setShowForm(false); setEditing(null); }}
+          onClose={closeForm}
         />
       )}
     </div>
   );
 }
 
-function RewardDefinitionCard({
+function RewardTemplateLibraryDialog({
+  definitions,
+  mutate,
+  busy,
+  onCreate,
+  onEdit,
+  onClose,
+}: {
+  definitions: AdminRewardDefinition[];
+  mutate: Mutate;
+  busy: boolean;
+  onCreate: () => void;
+  onEdit: (definition: RewardDefinition) => void;
+  onClose: () => void;
+}) {
+  const [kindFilter, setKindFilter] = useState<"all" | RewardKind>("all");
+  const [query, setQuery] = useState("");
+  const [selectedDefinitionId, setSelectedDefinitionId] = useState<string | null>(null);
+  const selectedDefinition = selectedDefinitionId
+    ? definitions.find((definition) => definition.id === selectedDefinitionId) || null
+    : null;
+  const normalizedQuery = query.trim().toLocaleLowerCase();
+  const filtered = definitions
+    .filter((definition) => kindFilter === "all" || definition.kind === kindFilter)
+    .filter((definition) => {
+      if (!normalizedQuery) return true;
+      return [
+        definition.name,
+        definition.description,
+        definitionValue(definition),
+        definition.physicalDescription,
+        definition.fulfillmentInstructions,
+      ].filter(Boolean).join(" ").toLocaleLowerCase().includes(normalizedQuery);
+    })
+    .sort((left, right) => Number(right.isActive) - Number(left.isActive) || right.updatedAt - left.updatedAt);
+  const filterOptions = ([
+    ["all", "全部", definitions.length],
+    ["random_time", "随机", definitions.filter((definition) => definition.kind === "random_time").length],
+    ["fixed_time", "固定", definitions.filter((definition) => definition.kind === "fixed_time").length],
+    ["physical", "实物", definitions.filter((definition) => definition.kind === "physical").length],
+  ] as const);
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape" || busy) return;
+      if (selectedDefinitionId) setSelectedDefinitionId(null);
+      else onClose();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [busy, onClose, selectedDefinitionId]);
+
+  return (
+    <div
+      className="fixed inset-0 z-[70] flex items-end justify-center bg-slate-900/45 p-0 sm:items-center sm:p-6"
+      role="presentation"
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget && !busy) onClose();
+      }}
+    >
+      <section
+        className="page-enter flex h-[92vh] w-full max-w-lg flex-col overflow-hidden rounded-t-[28px] bg-slate-50 shadow-2xl sm:h-[86vh] sm:max-h-[760px] sm:rounded-[28px]"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="reward-template-library-title"
+      >
+        <header className="flex shrink-0 items-center gap-3 border-b border-purple-100 bg-white p-4 sm:p-5">
+          <div className="grid h-11 w-11 shrink-0 place-items-center rounded-2xl bg-purple-100 text-purple-700">
+            <Gift size={23} strokeWidth={2.7} />
+          </div>
+          <div className="min-w-0 flex-1">
+            <h2 id="reward-template-library-title" className="text-xl font-black">奖励券模板</h2>
+            <p className="mt-0.5 text-xs font-bold text-slate-500">{definitions.length} 个模板 · {definitions.filter((definition) => definition.isActive).length} 个启用</p>
+          </div>
+          <button type="button" className="primary-button grid h-10 w-10 shrink-0 place-items-center !min-h-10 !rounded-xl !p-0 leading-none" aria-label="创建奖励券模板" disabled={busy} onClick={onCreate}><Plus size={21} strokeWidth={2.6} /></button>
+          <button type="button" className="secondary-button grid h-10 w-10 shrink-0 place-items-center !min-h-10 !rounded-xl !p-0 leading-none" aria-label="关闭模板库" disabled={busy} onClick={onClose}><X size={20} strokeWidth={2.6} /></button>
+        </header>
+
+        {selectedDefinition ? (
+          <div className="min-h-0 flex-1 overflow-y-auto p-4 sm:p-5">
+            <button type="button" className="mb-3 flex min-h-10 items-center gap-1 rounded-xl px-2 text-sm font-black text-purple-700 hover:bg-purple-100" onClick={() => setSelectedDefinitionId(null)}>
+              <ArrowLeft size={18} />返回模板列表
+            </button>
+            <RewardDefinitionDetail
+              definition={selectedDefinition}
+              mutate={mutate}
+              busy={busy}
+              onEdit={() => onEdit(selectedDefinition)}
+            />
+          </div>
+        ) : (
+          <>
+            <div className="shrink-0 bg-white px-4 pb-3 pt-3 sm:px-5">
+              <label className="relative block">
+                <Search className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={18} />
+                <input
+                  className="field !min-h-11 !pl-10"
+                  value={query}
+                  onChange={(event) => setQuery(event.target.value)}
+                  placeholder="搜索名称、说明或奖励内容"
+                  aria-label="搜索奖励券模板"
+                />
+              </label>
+              <div className="mt-3 flex gap-2 overflow-x-auto pb-1">
+                {filterOptions.map(([value, label, count]) => (
+                  <button
+                    key={value}
+                    type="button"
+                    className={`min-h-9 shrink-0 rounded-full px-3 text-xs font-black ${kindFilter === value ? "bg-purple-600 text-white" : "bg-slate-100 text-slate-600"}`}
+                    aria-pressed={kindFilter === value}
+                    onClick={() => setKindFilter(value)}
+                  >
+                    {label} {count}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className="min-h-0 flex-1 overflow-y-auto p-3 pt-0 sm:p-4 sm:pt-0">
+              {filtered.length === 0 ? (
+                <div className="rounded-3xl bg-white px-5 py-10 text-center shadow-sm">
+                  <Search className="mx-auto text-slate-300" size={32} />
+                  <p className="mt-3 font-black text-slate-700">没有找到模板</p>
+                  <p className="mt-1 text-sm font-semibold text-slate-500">换个关键词或类型试试。</p>
+                  {(query || kindFilter !== "all") && (
+                    <button type="button" className="secondary-button mt-4 !min-h-10 text-sm" onClick={() => { setQuery(""); setKindFilter("all"); }}>清除筛选</button>
+                  )}
+                </div>
+              ) : (
+                <div className="divide-y divide-purple-50 overflow-hidden rounded-3xl border border-purple-100 bg-white shadow-sm">
+                  {filtered.map((definition) => (
+                    <button
+                      key={definition.id}
+                      type="button"
+                      className="flex w-full items-center gap-3 px-3 py-3 text-left transition hover:bg-purple-50 sm:px-4"
+                      onClick={() => setSelectedDefinitionId(definition.id)}
+                    >
+                      <RewardVisual icon={definition.icon} imageUrl={definition.imageUrl} theme={definition.theme} size={46} />
+                      <div className="min-w-0 flex-1">
+                        <div className="flex min-w-0 items-center gap-1.5">
+                          <h3 className="truncate text-sm font-black">{definition.name}</h3>
+                          {!definition.isActive && <span className="shrink-0 rounded-md bg-slate-100 px-1.5 py-0.5 text-[10px] font-black text-slate-500">停用</span>}
+                        </div>
+                        <p className="mt-0.5 truncate text-xs font-bold text-purple-700">{definitionValue(definition)}</p>
+                        <p className="mt-0.5 text-[11px] font-semibold text-slate-500">{kindLabels[definition.kind]} · 版本 {definition.version}</p>
+                      </div>
+                      <ChevronRight className="shrink-0 text-slate-400" size={19} />
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          </>
+        )}
+      </section>
+    </div>
+  );
+}
+
+function RewardDefinitionDetail({
   definition,
   mutate,
   busy,
   onEdit,
 }: {
-  definition: RewardDefinition;
+  definition: AdminRewardDefinition;
   mutate: Mutate;
   busy: boolean;
   onEdit: () => void;
@@ -232,12 +447,12 @@ function RewardDefinitionCard({
   }
 
   return (
-    <article className={`app-card p-4 ${definition.isActive ? "" : "opacity-65"}`}>
-      <div className="flex items-start gap-3">
-        <RewardVisual icon={definition.icon} imageUrl={definition.imageUrl} theme={definition.theme} size={62} />
+    <article className="rounded-3xl border border-purple-100 bg-white p-4 shadow-sm sm:p-5">
+      <div className="flex items-start gap-4">
+        <RewardVisual icon={definition.icon} imageUrl={definition.imageUrl} theme={definition.theme} size={68} />
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-2">
-            <h3 className="font-black">{definition.name}</h3>
+            <h3 className="text-lg font-black">{definition.name}</h3>
             <span className="pill bg-purple-100 text-purple-700">{kindLabels[definition.kind]}</span>
             {!definition.isActive && <span className="pill bg-slate-100 text-slate-500">已停用</span>}
           </div>
@@ -245,11 +460,17 @@ function RewardDefinitionCard({
           <p className="mt-1 text-xs font-bold text-slate-500">版本 {definition.version} · 有效期：永久</p>
         </div>
       </div>
-      {definition.description && <p className="mt-3 rounded-2xl bg-slate-50 px-3 py-2 text-sm font-semibold leading-6 text-slate-600">{definition.description}</p>}
+      <div className="mt-4 rounded-2xl bg-slate-50 px-4 py-3">
+        <p className="text-xs font-black text-slate-500">公共说明</p>
+        <p className="mt-1 whitespace-pre-wrap text-sm font-semibold leading-6 text-slate-700">{definition.description || "未填写公共说明"}</p>
+      </div>
       {definition.kind === "physical" && (
-        <p className="mt-2 rounded-2xl bg-blue-50 px-3 py-2 text-sm font-semibold leading-6 text-blue-900">交付说明：{definition.fulfillmentInstructions}</p>
+        <div className="mt-3 space-y-2 rounded-2xl bg-blue-50 px-4 py-3 text-sm font-semibold leading-6 text-blue-900">
+          <p><strong>实物说明：</strong>{definition.physicalDescription}</p>
+          <p><strong>交付说明：</strong>{definition.fulfillmentInstructions}</p>
+        </div>
       )}
-      <div className="mt-3 grid grid-cols-3 gap-2">
+      <div className="mt-4 grid grid-cols-3 gap-2">
         <button className="secondary-button !min-h-11 !px-2 text-sm" disabled={busy} onClick={onEdit}>编辑</button>
         <button className="secondary-button !min-h-11 !px-2 text-sm" disabled={busy} onClick={() => void mutate({ action: "copy_reward_definition", definitionId: definition.id }, "模板副本已创建")}><Copy className="mr-1 inline" size={16} />复制</button>
         <button
@@ -277,6 +498,31 @@ function RewardDefinitionCard({
             }}
           >恢复图标</button>
         </div>
+      )}
+      {definition.canDelete ? (
+        <div className="mt-4 border-t border-red-100 pt-4">
+          <p className="mb-2 text-xs font-bold leading-5 text-slate-500">当前没有任务绑定、任务快照或已发券记录，可以安全删除。</p>
+          <button
+            type="button"
+            className="danger-button w-full"
+            disabled={busy}
+            onClick={() => {
+              if (window.confirm(`确定永久删除“${definition.name}”吗？此操作无法恢复。`)) {
+                void mutate(
+                  { action: "delete_reward_definition", definitionId: definition.id },
+                  `未使用模板“${definition.name}”已删除`,
+                );
+              }
+            }}
+          >
+            <Trash2 className="mr-1 inline" size={17} />永久删除未使用模板
+          </button>
+        </div>
+      ) : (
+        <p className="mt-4 flex items-start gap-2 rounded-2xl bg-slate-50 px-3 py-2.5 text-xs font-bold leading-5 text-slate-600">
+          <LockKeyhole className="mt-0.5 shrink-0" size={16} />
+          <span>{definitionUsageText(definition)}，为保留历史记录，该模板只能停用，不能删除。</span>
+        </p>
       )}
     </article>
   );

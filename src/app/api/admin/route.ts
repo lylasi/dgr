@@ -30,6 +30,7 @@ import {
   cancelRewardItem,
   copyRewardDefinition,
   createRewardDefinition,
+  deleteRewardDefinition,
   grantRewardDefinition,
   removeRewardDefinitionImage,
   setRewardDefinitionActive,
@@ -100,6 +101,7 @@ const mutationSchema = z.discriminatedUnion("action", [
     requestId,
   }),
   z.object({ action: z.literal("copy_reward_definition"), definitionId: rewardDefinitionId, requestId }),
+  z.object({ action: z.literal("delete_reward_definition"), definitionId: rewardDefinitionId, requestId }),
   z.object({
     action: z.literal("set_reward_definition_active"),
     definitionId: rewardDefinitionId,
@@ -293,6 +295,9 @@ export async function POST(request: NextRequest) {
         break;
       case "copy_reward_definition":
         copyRewardDefinition(input.definitionId, input.requestId);
+        break;
+      case "delete_reward_definition":
+        deleteRewardDefinition(input.definitionId, input.requestId);
         break;
       case "set_reward_definition_active":
         setRewardDefinitionActive(input.definitionId, input.active, input.requestId);

@@ -14,6 +14,7 @@ import {
 } from "@/lib/service";
 import {
   createRewardDefinition,
+  deleteRewardDefinition,
   setRewardSystemEnabled,
   updateRewardDefinition,
 } from "@/lib/reward-service";
@@ -415,6 +416,45 @@ describe.sequential("task reward combinations", () => {
       requestId: nextId("cancel-assignment"),
     });
     expect(getWorkerState(workerId).rewardItems).toHaveLength(beforeItems);
+  });
+
+  it("protects assignment snapshots after the current task binding is gone", () => {
+    const definitionId = createRewardDefinition({
+      name: "历史快照保护券",
+      description: "绑定移除后仍需保留模板",
+      icon: "clock",
+      theme: "blue",
+      kind: "fixed_time",
+      fixedSeconds: 8 * MINUTE,
+      requestId: nextId("snapshot-delete-definition"),
+    });
+    const taskId = createTask({
+      title: "历史快照删除保护",
+      description: "已领取任务保留快照",
+      rewardSeconds: MINUTE,
+      targetWorkerId: workerId,
+      timingMode: "none",
+      bonusEnabled: false,
+      rewardBindings: [{ definitionId, grantTier: "normal", quantity: 1, probabilityPercent: 100 }],
+      assignNow: true,
+      requestId: nextId("snapshot-delete-task"),
+    });
+    expect(assignmentFor(taskId).rewardItems).toHaveLength(1);
+
+    getDb().prepare("DELETE FROM task_reward_bindings WHERE task_id = ?").run(taskId);
+    expect(getDb().prepare("SELECT COUNT(*) AS count FROM task_reward_bindings WHERE definition_id = ?").get(definitionId))
+      .toEqual({ count: 0 });
+
+    try {
+      deleteRewardDefinition(definitionId, nextId("snapshot-delete-attempt"));
+      throw new Error("expected snapshot-protected template deletion to fail");
+    } catch (error) {
+      expect(error).toMatchObject({ code: "REWARD_DEFINITION_IN_USE", status: 409 });
+    }
+    expect(getAdminState().rewardDefinitions.find((definition) => definition.id === definitionId)).toMatchObject({
+      canDelete: false,
+      usage: { taskBindingCount: 0, assignmentSnapshotCount: 1, issuedRewardCount: 0 },
+    });
   });
 
   it("rolls back the whole review while rewards are paused and keeps retries idempotent", () => {

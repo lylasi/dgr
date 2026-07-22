@@ -40,6 +40,19 @@ type RewardItemJoined = WorkerRewardItemRow & {
   worker_name?: string;
 };
 
+type RewardDefinitionUsage = {
+  taskBindingCount: number;
+  assignmentSnapshotCount: number;
+  issuedRewardCount: number;
+};
+
+type RewardDefinitionWithUsageRow = RewardDefinitionRow & {
+  task_binding_count: number;
+  assignment_snapshot_count: number;
+  issued_reward_count: number;
+  image_snapshot_count: number;
+};
+
 const REWARD_ICONS = new Set(["gift", "sparkles", "clock", "book", "toy", "food", "trip"]);
 const REWARD_THEMES = new Set(["purple", "blue", "green", "orange", "pink"]);
 
@@ -65,6 +78,35 @@ function getDefinition(db: Db, definitionId: string): RewardDefinitionRow {
     .get(definitionId) as RewardDefinitionRow | undefined;
   if (!definition) throw new AppError("没有找到这个奖励券模板。", 404, "REWARD_DEFINITION_NOT_FOUND");
   return definition;
+}
+
+function getDefinitionUsage(db: Db, definitionId: string): RewardDefinitionUsage & { imageSnapshotCount: number } {
+  const row = db.prepare(`
+    SELECT
+      (SELECT COUNT(*) FROM task_reward_bindings WHERE definition_id = ?) AS task_binding_count,
+      (SELECT COUNT(*) FROM assignment_reward_items WHERE definition_id = ?) AS assignment_snapshot_count,
+      (SELECT COUNT(*) FROM worker_reward_items WHERE definition_id = ?) AS issued_reward_count,
+      (
+        SELECT COUNT(*) FROM assignment_reward_items item
+        JOIN reward_definition_images image ON image.id = item.image_id
+        WHERE image.definition_id = ?
+      ) + (
+        SELECT COUNT(*) FROM worker_reward_items item
+        JOIN reward_definition_images image ON image.id = item.image_id
+        WHERE image.definition_id = ?
+      ) AS image_snapshot_count
+  `).get(definitionId, definitionId, definitionId, definitionId, definitionId) as {
+    task_binding_count: number;
+    assignment_snapshot_count: number;
+    issued_reward_count: number;
+    image_snapshot_count: number;
+  };
+  return {
+    taskBindingCount: row.task_binding_count,
+    assignmentSnapshotCount: row.assignment_snapshot_count,
+    issuedRewardCount: row.issued_reward_count,
+    imageSnapshotCount: row.image_snapshot_count,
+  };
 }
 
 function getRewardItem(db: Db, rewardItemId: string): WorkerRewardItemRow {
@@ -585,6 +627,49 @@ export function setRewardDefinitionActive(definitionId: string, active: boolean,
       "reward_definition",
       definition.id,
       `${active ? "启用" : "停用"}模板：${definition.name}`,
+      mutationId,
+    );
+    return { duplicated: false };
+  }).immediate();
+}
+
+export function deleteRewardDefinition(definitionId: string, requestId?: string) {
+  const db = getDb();
+  const mutationId = normalizedRequestId(requestId);
+  return db.transaction(() => {
+    const previous = previousAuditTarget(db, mutationId);
+    if (previous) {
+      if (previous.action === "reward_definition_deleted" && previous.target_id === definitionId) {
+        return { duplicated: true };
+      }
+      throw new AppError("请求编号已用于另一项操作。", 409, "REQUEST_ID_CONFLICT");
+    }
+
+    const definition = getDefinition(db, definitionId);
+    const usage = getDefinitionUsage(db, definition.id);
+    if (
+      usage.taskBindingCount > 0
+      || usage.assignmentSnapshotCount > 0
+      || usage.issuedRewardCount > 0
+      || usage.imageSnapshotCount > 0
+    ) {
+      throw new AppError(
+        "这个模板已经绑定任务或生成过奖励记录，只能停用，不能删除。",
+        409,
+        "REWARD_DEFINITION_IN_USE",
+      );
+    }
+
+    db.prepare("UPDATE reward_definitions SET current_image_id = NULL WHERE id = ?").run(definition.id);
+    db.prepare("DELETE FROM reward_definition_images WHERE definition_id = ?").run(definition.id);
+    db.prepare("DELETE FROM reward_definitions WHERE id = ?").run(definition.id);
+    audit(
+      db,
+      "admin",
+      "reward_definition_deleted",
+      "reward_definition",
+      definition.id,
+      `删除未使用模板：${definition.name}`,
       mutationId,
     );
     return { duplicated: false };
@@ -1370,8 +1455,38 @@ export function getWorkerRewardState(workerId: string, now = Date.now()) {
 export function getAdminRewardState(now = Date.now()) {
   const db = getDb();
   const definitions = (db
-    .prepare("SELECT * FROM reward_definitions ORDER BY is_active DESC, created_at DESC")
-    .all() as RewardDefinitionRow[]).map(publicDefinition);
+    .prepare(`
+      SELECT definition.*,
+        (SELECT COUNT(*) FROM task_reward_bindings binding WHERE binding.definition_id = definition.id) AS task_binding_count,
+        (SELECT COUNT(*) FROM assignment_reward_items item WHERE item.definition_id = definition.id) AS assignment_snapshot_count,
+        (SELECT COUNT(*) FROM worker_reward_items item WHERE item.definition_id = definition.id) AS issued_reward_count,
+        (
+          SELECT COUNT(*) FROM assignment_reward_items item
+          JOIN reward_definition_images image ON image.id = item.image_id
+          WHERE image.definition_id = definition.id
+        ) + (
+          SELECT COUNT(*) FROM worker_reward_items item
+          JOIN reward_definition_images image ON image.id = item.image_id
+          WHERE image.definition_id = definition.id
+        ) AS image_snapshot_count
+      FROM reward_definitions definition
+      ORDER BY definition.is_active DESC, definition.created_at DESC
+    `)
+    .all() as RewardDefinitionWithUsageRow[]).map((row) => {
+    const usage: RewardDefinitionUsage = {
+      taskBindingCount: row.task_binding_count,
+      assignmentSnapshotCount: row.assignment_snapshot_count,
+      issuedRewardCount: row.issued_reward_count,
+    };
+    return {
+      ...publicDefinition(row),
+      canDelete: usage.taskBindingCount === 0
+        && usage.assignmentSnapshotCount === 0
+        && usage.issuedRewardCount === 0
+        && row.image_snapshot_count === 0,
+      usage,
+    };
+  });
   const settings = (db
     .prepare("SELECT * FROM worker_daily_coupon_settings ORDER BY worker_id")
     .all() as DailyCouponSettingRow[]).map(publicDailySetting);

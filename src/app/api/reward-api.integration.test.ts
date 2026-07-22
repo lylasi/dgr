@@ -152,6 +152,102 @@ describe.sequential("reward API permissions and concurrency", () => {
     secondWorkerCookie = sessionCookie(encodeSession(secondSession));
   });
 
+  it("deletes an unreferenced template and its private image idempotently", async () => {
+    const create = await adminPost(request("http://localhost/api/admin", adminCookie, {
+      action: "create_reward_definition",
+      name: "待删除空模板",
+      description: "从未绑定或发放",
+      icon: "gift",
+      theme: "pink",
+      kind: "physical",
+      physicalDescription: "测试礼物",
+      fulfillmentInstructions: "测试交付",
+      requestId: "api-create-disposable-definition",
+    }));
+    const createBody = await bodyOf<AdminState>(create);
+    if (!createBody.ok) throw new Error("failed to create disposable definition");
+    const definition = createBody.data.rewardDefinitions.find((item) => item.name === "待删除空模板")!;
+    expect(definition).toMatchObject({ canDelete: true, usage: { taskBindingCount: 0, assignmentSnapshotCount: 0, issuedRewardCount: 0 } });
+
+    const tinyPng = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl2nO0AAAAASUVORK5CYII=";
+    const upload = await adminPost(request("http://localhost/api/admin", adminCookie, {
+      action: "upload_reward_definition_image",
+      definitionId: definition.id,
+      imageDataUrl: tinyPng,
+      requestId: "api-upload-disposable-image",
+    }));
+    const uploadBody = await bodyOf<AdminState>(upload);
+    if (!uploadBody.ok) throw new Error("failed to upload disposable image");
+    const imageUrl = uploadBody.data.rewardDefinitions.find((item) => item.id === definition.id)!.imageUrl!;
+
+    const payload = {
+      action: "delete_reward_definition",
+      definitionId: definition.id,
+      requestId: "api-delete-disposable-definition",
+    };
+    const first = await adminPost(request("http://localhost/api/admin", adminCookie, payload));
+    const second = await adminPost(request("http://localhost/api/admin", adminCookie, payload));
+    const firstBody = await bodyOf<AdminState>(first);
+    const secondBody = await bodyOf<AdminState>(second);
+    expect(first.status).toBe(200);
+    expect(second.status).toBe(200);
+    expect(firstBody.ok && firstBody.data.rewardDefinitions.some((item) => item.id === definition.id)).toBe(false);
+    expect(secondBody.ok && secondBody.data.rewardDefinitions.some((item) => item.id === definition.id)).toBe(false);
+
+    const imageId = imageUrl.split("/").at(-1)!;
+    const deletedImage = await rewardImageGet(
+      new NextRequest(`http://localhost${imageUrl}`),
+      { params: Promise.resolve({ imageId }) },
+    );
+    expect(deletedImage.status).toBe(404);
+  });
+
+  it("refuses to delete a template that is bound to a task", async () => {
+    const create = await adminPost(request("http://localhost/api/admin", adminCookie, {
+      action: "create_reward_definition",
+      name: "任务绑定模板",
+      description: "删除保护测试",
+      icon: "clock",
+      theme: "orange",
+      kind: "fixed_time",
+      fixedSeconds: 300,
+      requestId: "api-create-bound-definition",
+    }));
+    const createBody = await bodyOf<AdminState>(create);
+    if (!createBody.ok) throw new Error("failed to create bound definition");
+    const definitionId = createBody.data.rewardDefinitions.find((item) => item.name === "任务绑定模板")!.id;
+
+    const taskResponse = await adminPost(request("http://localhost/api/admin", adminCookie, {
+      action: "create_task",
+      title: "模板删除保护任务",
+      description: "绑定后不能删除模板",
+      rewardSeconds: 60,
+      targetWorkerId: firstWorkerId,
+      timingMode: "none",
+      minimumDurationSeconds: null,
+      bonusEnabled: false,
+      excellentMultiplier: 2,
+      bonusCriteria: null,
+      rewardBindings: [{ definitionId, grantTier: "normal", quantity: 1, probabilityPercent: 100 }],
+      assignNow: false,
+      requestId: "api-create-definition-guard-task",
+    }));
+    const taskBody = await bodyOf<AdminState>(taskResponse);
+    if (!taskBody.ok) throw new Error("failed to bind definition to task");
+    expect(taskBody.data.rewardDefinitions.find((item) => item.id === definitionId)).toMatchObject({
+      canDelete: false,
+      usage: { taskBindingCount: 1 },
+    });
+
+    const deletion = await adminPost(request("http://localhost/api/admin", adminCookie, {
+      action: "delete_reward_definition",
+      definitionId,
+      requestId: "api-delete-bound-definition",
+    }));
+    expect(deletion.status).toBe(409);
+    expect(await bodyOf(deletion)).toMatchObject({ ok: false, error: { code: "REWARD_DEFINITION_IN_USE" } });
+  });
+
   it("keeps a direct grant idempotent through the administrator API", async () => {
     const payload = {
       action: "grant_reward_items",
@@ -167,6 +263,16 @@ describe.sequential("reward API permissions and concurrency", () => {
     const secondBody = await bodyOf<AdminState>(second);
     expect(firstBody.ok && firstBody.data.rewardItems.filter((item) => item.definitionId === fixedDefinitionId)).toHaveLength(1);
     expect(secondBody.ok && secondBody.data.rewardItems.filter((item) => item.definitionId === fixedDefinitionId)).toHaveLength(1);
+  });
+
+  it("refuses to delete a template that has already issued a reward", async () => {
+    const response = await adminPost(request("http://localhost/api/admin", adminCookie, {
+      action: "delete_reward_definition",
+      definitionId: fixedDefinitionId,
+      requestId: "api-delete-issued-definition",
+    }));
+    expect(response.status).toBe(409);
+    expect(await bodyOf(response)).toMatchObject({ ok: false, error: { code: "REWARD_DEFINITION_IN_USE" } });
   });
 
   it("allows only one of two devices to use the same coupon", async () => {

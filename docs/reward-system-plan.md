@@ -445,7 +445,7 @@
 - 预留 `validity_mode`、`validity_days`、`validity_fixed_at`；第一阶段 `validity_mode = 'permanent'`，另外两个字段为空。
 - 数据库 `CHECK` 和服务端校验保证三类专属字段互斥且完整。
 - 编辑模板只影响以后发放的券；已经发出的券使用自己的内容快照。
-- 模板被任务、每日设置或历史记录引用后不能物理删除，只能停用。
+- 当前没有任务绑定、任务快照或已发券记录的空模板可以物理删除；仍有任何业务引用时只能停用。
 
 ### `reward_definition_images`
 

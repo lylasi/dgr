@@ -96,6 +96,13 @@ function messageOf(error: unknown) {
   return error instanceof Error ? error.message : "操作失败，请再试一次。";
 }
 
+function timerAssignmentsFor(worker: Pick<AdminWorker, "assignments">) {
+  return worker.assignments.filter((assignment) =>
+    ["claimed", "in_progress", "revision_requested"].includes(assignment.status)
+      && assignment.timingMode !== "none",
+  );
+}
+
 async function prepareAvatarImage(file: File): Promise<string> {
   if (!["image/png", "image/jpeg", "image/webp"].includes(file.type)) {
     throw new Error("请选择 JPG、PNG 或 WebP 图片。");
@@ -141,6 +148,7 @@ export function AdminApp({
   const [busy, setBusy] = useState(false);
   const [quickRewardWorkerId, setQuickRewardWorkerId] = useState<string | null>(null);
   const [rewardWorkerId, setRewardWorkerId] = useState<string | null>(null);
+  const [quickTimerWorkerId, setQuickTimerWorkerId] = useState<string | null>(null);
   const [toast, setToast] = useState<{ message: string; tone: "success" | "error" } | null>(null);
 
   const load = useCallback(async (quiet = false) => {
@@ -196,6 +204,9 @@ export function AdminApp({
   const nav = adminNavItems.map((item) =>
     item.id === "reviews" ? { ...item, badge: state.reviews.length + state.rewardRequests.length } : item,
   );
+  const quickTimerWorker = quickTimerWorkerId
+    ? state.workers.find((worker) => worker.id === quickTimerWorkerId) || null
+    : null;
 
   return (
     <div className="min-h-screen pb-28">
@@ -207,7 +218,7 @@ export function AdminApp({
         admin
       />
       <main className="page-enter mx-auto w-full max-w-3xl px-4 pb-8 sm:px-6">
-        {tab === "home" && <AdminHome state={state} setTab={setTab} mutate={mutate} busy={busy} onQuickReward={(workerId) => setQuickRewardWorkerId(workerId || "")} />}
+        {tab === "home" && <AdminHome state={state} setTab={setTab} mutate={mutate} busy={busy} onQuickReward={(workerId) => setQuickRewardWorkerId(workerId || "")} onDirectReward={setRewardWorkerId} onQuickTimer={setQuickTimerWorkerId} />}
         {tab === "publish" && <PublishPanel state={state} mutate={mutate} busy={busy} />}
         {tab === "reviews" && <ReviewPanel state={state} mutate={mutate} busy={busy} />}
         {tab === "workers" && <WorkersPanel state={state} mutate={mutate} busy={busy} onQuickReward={setQuickRewardWorkerId} onDirectReward={setRewardWorkerId} />}
@@ -234,6 +245,15 @@ export function AdminApp({
           onClose={() => setRewardWorkerId(null)}
         />
       )}
+      {quickTimerWorker && (
+        <QuickTimerDialog
+          worker={quickTimerWorker}
+          activities={state.activities}
+          mutate={mutate}
+          busy={busy}
+          onClose={() => setQuickTimerWorkerId(null)}
+        />
+      )}
     </div>
   );
 }
@@ -256,18 +276,24 @@ function AdminHome({
   mutate,
   busy,
   onQuickReward,
+  onDirectReward,
+  onQuickTimer,
 }: {
   state: AdminState;
   setTab: (tab: AdminTab) => void;
   mutate: (body: Record<string, unknown>, success: string) => Promise<boolean>;
   busy: boolean;
   onQuickReward: (workerId?: string) => void;
+  onDirectReward: (workerId: string) => void;
+  onQuickTimer: (workerId: string) => void;
 }) {
   const activeWorkers = state.workers.filter((worker) => worker.isActive);
   const running = activeWorkers.filter((worker) => worker.activeTimer);
   const today = new Date().toDateString();
   const todayTransactions = state.transactions.filter((transaction) => new Date(transaction.createdAt).toDateString() === today);
   const todayIncome = todayTransactions.filter((item) => item.amountSeconds > 0).reduce((sum, item) => sum + item.amountSeconds, 0);
+  const canIssueCoupons = state.rewardSystemEnabled && state.rewardDefinitions.some((definition) => definition.isActive);
+  const activeActivities = state.activities.filter((activity) => activity.isActive);
 
   return (
     <div className="space-y-6">
@@ -316,50 +342,88 @@ function AdminHome({
         />
       ) : (
         <section>
-          <SectionTitle title="打工人状态" text="可以在这里代为结束正在运行的计时" />
+          <SectionTitle title="打工人状态" text="直接发券、补奖或代为操作计时" />
           <div className="space-y-3">
-            {activeWorkers.map((worker) => (
-              <div key={worker.id} className="app-card p-4">
-                <div className="flex items-center gap-3">
-                  <Avatar avatar={worker.avatar} theme={worker.theme} imageUrl={worker.avatarUrl} />
-                  <div className="min-w-0 flex-1">
-                    <div className="flex items-center gap-2">
-                      <h3 className="truncate font-black">{worker.name}</h3>
-                      {worker.pendingReviewCount > 0 && <span className="pill bg-purple-100 text-purple-700">待审 {worker.pendingReviewCount}</span>}
+            {activeWorkers.map((worker) => {
+              const canOpenTimer = Boolean(worker.activeTimer)
+                || timerAssignmentsFor(worker).length > 0
+                || (worker.balanceSeconds > 0 && activeActivities.length > 0);
+              return (
+                <div key={worker.id} className="app-card p-4">
+                  <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
+                    <div className="flex min-w-0 flex-1 items-center gap-3">
+                      <Avatar avatar={worker.avatar} theme={worker.theme} imageUrl={worker.avatarUrl} />
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center gap-2">
+                          <h3 className="truncate font-black">{worker.name}</h3>
+                          {worker.pendingReviewCount > 0 && <span className="pill bg-purple-100 text-purple-700">待审 {worker.pendingReviewCount}</span>}
+                        </div>
+                        <div className="mt-1 text-sm text-slate-600"><TimeCoin seconds={worker.balanceSeconds} compact /></div>
+                      </div>
                     </div>
-                    <div className="mt-1 text-sm text-slate-600"><TimeCoin seconds={worker.balanceSeconds} compact /></div>
-                  </div>
-                </div>
-                {worker.activeTimer ? (
-                  <div className="mt-3 flex items-center justify-between gap-3 rounded-2xl bg-orange-50 p-3">
-                    <div className="min-w-0">
-                      <p className="truncate text-sm font-black text-orange-800">{worker.activeTimer.title}</p>
-                      <LiveClock startedAt={worker.activeTimer.startedAt} className="text-xl text-orange-700" />
-                    </div>
-                    <div className="flex shrink-0 gap-1.5">
-                      {worker.activeTimer.type === "consumption" && (
-                        <button
-                          className="secondary-button !min-h-11 !px-2 text-xs"
-                          disabled={busy}
-                          onClick={() => mutate({ action: "cancel_consumption_timer", workerId: worker.id }, `已撤销 ${worker.name} 的误触计时，本次未扣款`)}
-                        >
-                          误触撤销
-                        </button>
-                      )}
+                    <div className="grid shrink-0 grid-cols-3 gap-2">
                       <button
-                        className="danger-button !px-3"
-                        disabled={busy}
-                        onClick={() => mutate({ action: "timer_stop", workerId: worker.id }, `已帮 ${worker.name} 结束计时`)}
+                        type="button"
+                        className="primary-button !min-h-10 !rounded-xl !px-2 text-xs sm:!px-3"
+                        disabled={busy || !canIssueCoupons}
+                        aria-label={`给 ${worker.name} 发奖励券`}
+                        title={!canIssueCoupons ? "请先启用奖励系统并创建可用的奖励券模板" : undefined}
+                        onClick={() => onDirectReward(worker.id)}
                       >
-                        <Pause className="inline" size={18} /> 结束
+                        <Gift className="mr-1 inline" size={16} />发券
+                      </button>
+                      <button
+                        type="button"
+                        className="success-button !min-h-10 !rounded-xl !px-2 text-xs sm:!px-3"
+                        disabled={busy}
+                        aria-label={`给 ${worker.name} 补录奖励`}
+                        onClick={() => onQuickReward(worker.id)}
+                      >
+                        <Plus className="mr-1 inline" size={16} />补奖
+                      </button>
+                      <button
+                        type="button"
+                        className="secondary-button !min-h-10 !rounded-xl !px-2 text-xs sm:!px-3"
+                        disabled={busy || !canOpenTimer}
+                        aria-label={`操作 ${worker.name} 的计时`}
+                        title={!canOpenTimer ? "当前没有可计时的任务或可用的消耗项目" : undefined}
+                        onClick={() => onQuickTimer(worker.id)}
+                      >
+                        <Clock3 className="mr-1 inline" size={16} />计时
                       </button>
                     </div>
                   </div>
-                ) : (
-                  <p className="mt-3 rounded-xl bg-slate-50 px-3 py-2 text-sm font-bold text-slate-500">现在没有计时</p>
-                )}
-              </div>
-            ))}
+                  {worker.activeTimer ? (
+                    <div className="mt-3 flex items-center justify-between gap-3 rounded-2xl bg-orange-50 p-3">
+                      <div className="min-w-0">
+                        <p className="truncate text-sm font-black text-orange-800">{worker.activeTimer.title}</p>
+                        <LiveClock startedAt={worker.activeTimer.startedAt} className="text-xl text-orange-700" />
+                      </div>
+                      <div className="flex shrink-0 gap-1.5">
+                        {worker.activeTimer.type === "consumption" && (
+                          <button
+                            className="secondary-button !min-h-11 !px-2 text-xs"
+                            disabled={busy}
+                            onClick={() => mutate({ action: "cancel_consumption_timer", workerId: worker.id }, `已撤销 ${worker.name} 的误触计时，本次未扣款`)}
+                          >
+                            误触撤销
+                          </button>
+                        )}
+                        <button
+                          className="danger-button !px-3"
+                          disabled={busy}
+                          onClick={() => mutate({ action: "timer_stop", workerId: worker.id }, `已帮 ${worker.name} 结束计时`)}
+                        >
+                          <Pause className="inline" size={18} /> 结束
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
+                    <p className="mt-3 rounded-xl bg-slate-50 px-3 py-2 text-sm font-bold text-slate-500">现在没有计时</p>
+                  )}
+                </div>
+              );
+            })}
           </div>
         </section>
       )}
@@ -795,6 +859,171 @@ function PublishPanel({
             {state.tasks.map((task) => (
               <TaskAdminCard key={task.id} task={task} workers={state.workers} mutate={mutate} busy={busy} onEdit={() => loadTask(task, false)} onCopy={() => loadTask(task, true)} />
             ))}
+          </div>
+        )}
+      </section>
+    </div>
+  );
+}
+
+function QuickTimerDialog({
+  worker,
+  activities,
+  mutate,
+  busy,
+  onClose,
+}: {
+  worker: AdminWorker;
+  activities: AdminState["activities"];
+  mutate: (body: Record<string, unknown>, success: string) => Promise<boolean>;
+  busy: boolean;
+  onClose: () => void;
+}) {
+  const timerAssignments = timerAssignmentsFor(worker);
+  const activeActivities = activities.filter((activity) => activity.isActive);
+  const [timerTarget, setTimerTarget] = useState(() => timerAssignments.length === 1 ? timerAssignments[0].id : "");
+  const [pendingConsumptionId, setPendingConsumptionId] = useState<string | null>(null);
+  const selectedTimerTarget = timerAssignments.some((assignment) => assignment.id === timerTarget)
+    ? timerTarget
+    : timerAssignments.length === 1 ? timerAssignments[0].id : "";
+  const pendingConsumption = activeActivities.find((activity) => activity.id === pendingConsumptionId);
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && !busy && !pendingConsumptionId) onClose();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [busy, onClose, pendingConsumptionId]);
+
+  if (pendingConsumption) {
+    return (
+      <ConsumptionStartDialog
+        activityName={pendingConsumption.name}
+        balanceSeconds={worker.balanceSeconds}
+        workerName={worker.name}
+        busy={busy}
+        onCancel={() => setPendingConsumptionId(null)}
+        onConfirm={async () => {
+          const ok = await mutate(
+            { action: "timer_start", workerId: worker.id, timerType: "consumption", targetId: pendingConsumption.id },
+            `已帮 ${worker.name} 开始${pendingConsumption.name}计时`,
+          );
+          if (ok) onClose();
+        }}
+      />
+    );
+  }
+
+  async function startTaskTimer() {
+    const assignment = timerAssignments.find((item) => item.id === selectedTimerTarget);
+    if (!assignment) return;
+    const ok = await mutate(
+      { action: "timer_start", workerId: worker.id, timerType: "reward_task", targetId: assignment.id },
+      `已帮 ${worker.name} 开始“${assignment.title}”计时`,
+    );
+    if (ok) onClose();
+  }
+
+  async function stopTimer(action: "timer_stop" | "cancel_consumption_timer") {
+    const ok = await mutate(
+      { action, workerId: worker.id },
+      action === "timer_stop"
+        ? `已帮 ${worker.name} 结束计时`
+        : `已撤销 ${worker.name} 的误触计时，本次未扣款`,
+    );
+    if (ok) onClose();
+  }
+
+  return (
+    <div
+      className="fixed inset-0 z-[70] flex items-end justify-center bg-slate-900/45 p-3 sm:items-center sm:p-6"
+      role="presentation"
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget && !busy) onClose();
+      }}
+    >
+      <section
+        className="page-enter max-h-[calc(100vh-24px)] w-full max-w-md overflow-y-auto rounded-[28px] bg-white p-5 shadow-2xl sm:p-6"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="quick-timer-title"
+      >
+        <div className="flex items-start gap-3">
+          <div className="grid h-11 w-11 shrink-0 place-items-center rounded-2xl bg-blue-100 text-blue-700">
+            <Clock3 size={24} strokeWidth={2.8} />
+          </div>
+          <div className="min-w-0 flex-1">
+            <h2 id="quick-timer-title" className="truncate text-xl font-black">帮 {worker.name} 计时</h2>
+            <p className="mt-1 text-sm font-semibold leading-6 text-slate-500">选择奖励任务，或开始一项时间币消耗。</p>
+          </div>
+          <button type="button" className="secondary-button !min-h-10 !w-10 !p-0" aria-label="关闭计时操作" disabled={busy} onClick={onClose}>×</button>
+        </div>
+
+        <div className="mt-4 flex items-center gap-3 rounded-2xl bg-slate-50 p-3">
+          <Avatar avatar={worker.avatar} theme={worker.theme} imageUrl={worker.avatarUrl} size={44} />
+          <div className="min-w-0"><p className="truncate text-sm font-black">{worker.name}</p><div className="mt-1 text-sm text-slate-600"><TimeCoin seconds={worker.balanceSeconds} compact /></div></div>
+        </div>
+
+        {worker.activeTimer ? (
+          <div className="mt-4 rounded-2xl bg-orange-50 p-4">
+            <p className="text-xs font-black text-orange-600">正在计时</p>
+            <p className="mt-1 truncate font-black text-orange-900">{worker.activeTimer.title}</p>
+            <LiveClock startedAt={worker.activeTimer.startedAt} className="mt-1 text-2xl text-orange-700" />
+            <div className={`mt-4 grid gap-2 ${worker.activeTimer.type === "consumption" ? "grid-cols-2" : "grid-cols-1"}`}>
+              {worker.activeTimer.type === "consumption" && (
+                <button type="button" className="secondary-button" disabled={busy} onClick={() => void stopTimer("cancel_consumption_timer")}>误触撤销</button>
+              )}
+              <button type="button" className="danger-button" disabled={busy} onClick={() => void stopTimer("timer_stop")}><Pause className="mr-1 inline" size={18} />结束计时</button>
+            </div>
+          </div>
+        ) : (
+          <div className="mt-4 space-y-3">
+            <section className="rounded-2xl bg-blue-50 p-4">
+              <h3 className="font-black text-blue-900"><Award className="mr-1 inline" size={18} />奖励任务计时</h3>
+              <p className="mt-1 text-xs font-semibold leading-5 text-blue-700">为已经参加、且允许计时的任务记录时长。</p>
+              {timerAssignments.length > 0 ? (
+                <div className="mt-3 flex gap-2">
+                  <select className="field !min-h-11 min-w-0 flex-1" value={selectedTimerTarget} onChange={(event) => setTimerTarget(event.target.value)}>
+                    <option value="">选择奖励任务</option>
+                    {timerAssignments.map((assignment) => (
+                      <option value={assignment.id} key={assignment.id}>
+                        {assignment.title}{assignment.timingMode === "required" ? `（至少 ${formatDuration(assignment.minimumDurationSeconds || 0, false)}）` : ""}
+                      </option>
+                    ))}
+                  </select>
+                  <button type="button" className="primary-button shrink-0 !px-3" disabled={busy || !selectedTimerTarget} onClick={() => void startTaskTimer()}><Play className="mr-1 inline" size={17} />开始</button>
+                </div>
+              ) : (
+                <p className="mt-3 rounded-xl bg-white/70 px-3 py-2 text-sm font-bold text-slate-500">当前没有可计时的奖励任务。</p>
+              )}
+            </section>
+
+            <section className="rounded-2xl bg-orange-50 p-4">
+              <h3 className="font-black text-orange-900"><Clock3 className="mr-1 inline" size={18} />消耗计时</h3>
+              <p className="mt-1 text-xs font-semibold leading-5 text-orange-700">开始后会按秒扣除时间币，结束计时后停止。</p>
+              {activeActivities.length > 0 ? (
+                <div className="mt-3 grid grid-cols-2 gap-2">
+                  {activeActivities.map((activity) => {
+                    const Icon = activityIcon(activity.icon);
+                    return (
+                      <button
+                        key={activity.id}
+                        type="button"
+                        className="secondary-button !min-h-11 !px-2 text-sm"
+                        disabled={busy || worker.balanceSeconds <= 0}
+                        onClick={() => setPendingConsumptionId(activity.id)}
+                      >
+                        <Icon className="mr-1 inline" size={17} />{activity.name}
+                      </button>
+                    );
+                  })}
+                </div>
+              ) : (
+                <p className="mt-3 rounded-xl bg-white/70 px-3 py-2 text-sm font-bold text-slate-500">当前没有启用的消耗项目。</p>
+              )}
+              {worker.balanceSeconds <= 0 && activeActivities.length > 0 && <p className="mt-2 text-xs font-black text-orange-700">时间币余额不足，暂时不能开始消耗计时。</p>}
+            </section>
           </div>
         )}
       </section>
@@ -1387,7 +1616,7 @@ function WorkerManageCard({
   const [customDailyMinutes, setCustomDailyMinutes] = useState("");
   const [manualActivityId, setManualActivityId] = useState(state.activities.find((activity) => activity.isActive)?.id || "");
   const [manualConsumptionMinutes, setManualConsumptionMinutes] = useState("");
-  const timerAssignments = worker.assignments.filter((assignment) => ["claimed", "in_progress", "revision_requested"].includes(assignment.status) && assignment.timingMode !== "none");
+  const timerAssignments = timerAssignmentsFor(worker);
   const editableAssignments = worker.assignments.filter((assignment) => ["claimed", "in_progress", "submitted", "revision_requested"].includes(assignment.status));
   const activeActivities = state.activities.filter((activity) => activity.isActive);
   const pendingConsumption = activeActivities.find((activity) => activity.id === pendingConsumptionId);
