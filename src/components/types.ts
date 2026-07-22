@@ -217,6 +217,7 @@ export type Transaction = {
   actor: string;
   reason: string | null;
   rewardItemId: string | null;
+  assignmentId: string | null;
   startedAt: number | null;
   endedAt: number | null;
   createdAt: number;

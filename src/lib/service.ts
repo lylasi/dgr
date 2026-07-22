@@ -515,6 +515,7 @@ function publicTransaction(row: TransactionRow, workerName?: string) {
     actor: row.actor,
     reason: row.reason,
     rewardItemId: row.reward_item_id,
+    assignmentId: row.assignment_id,
     startedAt: row.started_at,
     endedAt: row.ended_at,
     createdAt: row.created_at,

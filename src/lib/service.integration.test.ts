@@ -137,6 +137,10 @@ describe.sequential("SQLite business flow", () => {
     const approved = getWorkerState(workerId);
     expect(approved.worker.balanceSeconds).toBe(3 * HOUR);
     expect(approved.assignments[0].reviewMultiplier).toBe(2);
+    expect(approved.transactions.find((transaction) => transaction.type === "task_reward")).toMatchObject({
+      assignmentId,
+      amountSeconds: HOUR,
+    });
   });
 
   it("does not reward an already reviewed assignment twice", () => {

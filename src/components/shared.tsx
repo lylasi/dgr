@@ -12,7 +12,6 @@ import {
   Gift,
   HeartHandshake,
   Home,
-  Info,
   ListChecks,
   Medal,
   Play,
@@ -22,7 +21,6 @@ import {
   Star,
   UserRound,
   Video,
-  X,
 } from "lucide-react";
 import { useEffect, useState } from "react";
 import type { AssignmentRewardItem, TaskRewardBinding } from "@/components/types";
@@ -210,111 +208,6 @@ export function TaskRewardList({
 
 export function awardedTaskRewardItems(items: AssignmentRewardItem[]) {
   return items.filter((item) => (item.awardedQuantity || 0) > 0);
-}
-
-export function TaskRewardOutcomeSummary({
-  baseRewardSeconds,
-  reviewMultiplier,
-  reviewTier,
-  reviewNote,
-  items,
-}: {
-  baseRewardSeconds: number;
-  reviewMultiplier: number;
-  reviewTier: "normal" | "excellent" | null;
-  reviewNote: string | null;
-  items: AssignmentRewardItem[];
-}) {
-  const [open, setOpen] = useState(false);
-  const awardedItems = awardedTaskRewardItems(items);
-  const awardedQuantity = awardedItems.reduce((total, item) => total + (item.awardedQuantity || 0), 0);
-  const visibleItems = awardedItems.slice(0, 1);
-  const creditedSeconds = Math.round(baseRewardSeconds * reviewMultiplier);
-  useEffect(() => {
-    if (!open) return;
-    const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setOpen(false);
-    };
-    window.addEventListener("keydown", closeOnEscape);
-    return () => window.removeEventListener("keydown", closeOnEscape);
-  }, [open]);
-
-  return (
-    <>
-      <div className="flex shrink-0 items-center gap-1.5">
-        {awardedItems.length > 0 ? (
-          <div className="flex min-w-0 items-center gap-1.5" aria-label={`获得 ${awardedQuantity} 张奖励券`}>
-            {visibleItems.map((item) => (
-              <span key={item.id} className="relative" title={`${item.name} ×${item.awardedQuantity}`}>
-                <RewardVisual icon={item.icon} imageUrl={item.imageUrl} theme={item.theme} size={30} />
-                {(item.awardedQuantity || 0) > 1 && (
-                  <span className="absolute -bottom-1 -right-1 rounded-full bg-purple-600 px-1.5 text-[10px] font-black leading-4 text-white">
-                    ×{item.awardedQuantity}
-                  </span>
-                )}
-              </span>
-            ))}
-            <span className="text-[11px] font-black text-purple-700">×{awardedQuantity}</span>
-          </div>
-        ) : null}
-        <button
-          type="button"
-          className="grid h-9 w-9 shrink-0 place-items-center rounded-full bg-purple-100 text-purple-700 transition hover:bg-purple-200"
-          aria-label="查看任务结算详情"
-          title="查看详情"
-          onClick={() => setOpen(true)}
-        >
-          <Info size={19} strokeWidth={2.6} />
-        </button>
-      </div>
-      {open && (
-        <div
-          className="fixed inset-0 z-[70] flex items-end justify-center bg-slate-900/45 p-3 sm:items-center sm:p-6"
-          role="presentation"
-          onMouseDown={(event) => { if (event.target === event.currentTarget) setOpen(false); }}
-        >
-          <section
-            className="page-enter max-h-[85vh] w-full max-w-md overflow-y-auto rounded-[28px] bg-white p-5 shadow-2xl sm:p-6"
-            role="dialog"
-            aria-modal="true"
-            aria-label="任务结算详情"
-          >
-            <div className="flex items-center justify-between gap-3">
-              <div>
-                <p className="text-xs font-black text-purple-600">任务结算</p>
-                <h2 className="mt-0.5 text-xl font-black">审核详情</h2>
-              </div>
-              <button type="button" className="grid h-10 w-10 place-items-center rounded-full bg-slate-100 text-slate-600" aria-label="关闭详情" onClick={() => setOpen(false)}>
-                <X size={20} />
-              </button>
-            </div>
-            <div className="mt-4 space-y-3">
-              <div className="flex flex-wrap items-center justify-between gap-2 rounded-2xl bg-slate-50 p-3">
-                <div>
-                  <p className="text-[11px] font-black text-slate-500">审核结果</p>
-                  <p className="mt-0.5 text-sm font-black text-slate-800">
-                    {reviewTier === "excellent" ? `优秀完成 · 基础 ×${reviewMultiplier}` : "正常完成 · 基础 ×1"}
-                  </p>
-                </div>
-                <span className="text-sm text-purple-700"><TimeCoin seconds={creditedSeconds} compact /></span>
-              </div>
-              {reviewNote && (
-                <p className="rounded-xl bg-slate-50 px-3 py-2 text-sm font-semibold leading-6 text-slate-600">
-                  管理员说：{reviewNote}
-                </p>
-              )}
-              {awardedItems.length > 0 && (
-                <div>
-                  <p className="mb-2 text-xs font-black text-slate-600">获得的奖励券</p>
-                  <TaskRewardList items={awardedItems} showOutcomes />
-                </div>
-              )}
-            </div>
-          </section>
-        </div>
-      )}
-    </>
-  );
 }
 
 export function TaskRewardSummary({
@@ -547,7 +440,6 @@ export function BottomNav<T extends string>({
 export const workerNavItems = [
   { id: "home" as const, label: "首页", icon: Home },
   { id: "tasks" as const, label: "打工", icon: ListChecks },
-  { id: "running" as const, label: "进度", icon: Play },
   { id: "rewards" as const, label: "奖励", icon: Gift },
   { id: "ledger" as const, label: "明细", icon: Award },
   { id: "me" as const, label: "我的", icon: UserRound },
