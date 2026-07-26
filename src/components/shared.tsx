@@ -142,17 +142,23 @@ export function TaskRewardList({
   showOutcomes = false,
   emptyText = "未配置奖励券",
   workerPreview = false,
+  compact = false,
+  showDescription = false,
+  showGrantTier = false,
 }: {
   items: TaskRewardDisplayItem[];
   showOutcomes?: boolean;
   emptyText?: string;
   workerPreview?: boolean;
+  compact?: boolean;
+  showDescription?: boolean;
+  showGrantTier?: boolean;
 }) {
   if (items.length === 0) {
     return <p className="rounded-xl bg-white/65 px-3 py-2 text-xs font-bold text-slate-500">{emptyText}</p>;
   }
   return (
-    <div className="space-y-2">
+    <div className={compact ? "space-y-1.5" : "space-y-2"}>
       {items.map((item) => {
         const awardedQuantity = "awardedQuantity" in item ? item.awardedQuantity : null;
         const mystery = item.isMystery || (workerPreview && item.probabilityPercent > 0 && item.probabilityPercent < 100);
@@ -160,13 +166,13 @@ export function TaskRewardList({
           return (
             <div
               key={`${item.grantTier}:mystery:${"bindingId" in item ? item.bindingId : item.id}`}
-              className="flex items-center gap-3 rounded-2xl bg-white/80 p-3"
+              className={`flex items-center bg-white/80 ${compact ? "gap-2 rounded-xl px-2.5 py-2" : "gap-3 rounded-2xl p-3"}`}
               aria-label="可能获得神秘奖励券"
             >
-              <RewardVisual icon="sparkles" theme={item.grantTier === "excellent_bonus" ? "orange" : "purple"} size={48} />
+              <RewardVisual icon="sparkles" theme={item.grantTier === "excellent_bonus" ? "orange" : "purple"} size={compact ? 38 : 48} />
               <div className="min-w-0 flex-1">
-                <p className="font-black text-slate-800">可能获得神秘奖励券</p>
-                <p className="mt-1 text-xs font-bold text-slate-500">完成并审核后揭晓</p>
+                <p className={`${compact ? "text-sm" : ""} font-black text-slate-800`}>可能获得神秘奖励券</p>
+                <p className={`${compact ? "mt-0.5 text-[11px]" : "mt-1 text-xs"} font-bold text-slate-500`}>完成并审核后揭晓</p>
               </div>
             </div>
           );
@@ -174,16 +180,18 @@ export function TaskRewardList({
         return (
           <div
             key={`${item.grantTier}:${"bindingId" in item ? item.bindingId : item.id}`}
-            className="flex items-start gap-3 rounded-2xl bg-white/80 p-3"
+            className={`flex items-start bg-white/80 ${compact ? "gap-2 rounded-xl px-2.5 py-2" : "gap-3 rounded-2xl p-3"}`}
           >
-            <RewardVisual icon={item.icon} imageUrl={item.imageUrl} theme={item.theme} size={48} />
+            <RewardVisual icon={item.icon} imageUrl={item.imageUrl} theme={item.theme} size={compact ? 38 : 48} />
             <div className="min-w-0 flex-1">
               <div className="flex flex-wrap items-center gap-1.5">
-                <p className="font-black text-slate-800">{item.name}</p>
+                <p className={`${compact ? "text-sm" : ""} font-black text-slate-800`}>{item.name}</p>
                 <span className="pill bg-purple-100 text-purple-700">× {item.quantity}</span>
+                {showGrantTier && <span className={`rounded-md px-1.5 py-0.5 text-[10px] font-black ${item.grantTier === "excellent_bonus" ? "bg-amber-100 text-amber-800" : "bg-blue-100 text-blue-700"}`}>{item.grantTier === "excellent_bonus" ? "优秀额外" : "普通奖励"}</span>}
               </div>
-              <p className="mt-1 text-xs font-bold text-slate-600">{taskRewardValue(item)}</p>
-              {!showOutcomes && <p className="mt-1 text-xs font-black text-purple-700">
+              <p className={`${compact ? "mt-0.5 text-[11px]" : "mt-1 text-xs"} font-bold text-slate-600`}>{taskRewardValue(item)}</p>
+              {showDescription && item.description && <p className={`${compact ? "mt-0.5 text-[11px] leading-4" : "mt-1 text-xs leading-5"} font-semibold text-slate-500`}>{item.description}</p>}
+              {!showOutcomes && <p className={`${compact ? "mt-0.5 text-[11px]" : "mt-1 text-xs"} font-black text-purple-700`}>
                 {item.probabilityPercent === 100
                   ? workerPreview ? "完成必得" : "100% 必得"
                   : item.quantity > 1
@@ -191,10 +199,10 @@ export function TaskRewardList({
                     : `${item.probabilityPercent}% 概率`}
               </p>}
               {item.kind === "physical" && item.fulfillmentInstructions && (
-                <p className="mt-1 text-xs font-semibold leading-5 text-slate-500">交付：{item.fulfillmentInstructions}</p>
+                <p className={`${compact ? "mt-0.5 text-[11px] leading-4" : "mt-1 text-xs leading-5"} font-semibold text-slate-500`}>交付：{item.fulfillmentInstructions}</p>
               )}
               {showOutcomes && awardedQuantity !== null && (
-                <p className={`mt-1 text-xs font-black ${awardedQuantity > 0 ? "text-emerald-700" : "text-slate-500"}`}>
+                <p className={`${compact ? "mt-0.5 text-[11px]" : "mt-1 text-xs"} font-black ${awardedQuantity > 0 ? "text-emerald-700" : "text-slate-500"}`}>
                   {awardedQuantity > 0 ? `本次实际获得 ${awardedQuantity} 张` : "本次概率未命中"}
                 </p>
               )}
@@ -208,6 +216,23 @@ export function TaskRewardList({
 
 export function awardedTaskRewardItems(items: AssignmentRewardItem[]) {
   return items.filter((item) => (item.awardedQuantity || 0) > 0);
+}
+
+export function AwardedCouponMarks({ items }: { items: AssignmentRewardItem[] }) {
+  const awarded = awardedTaskRewardItems(items);
+  if (awarded.length === 0) return null;
+  const total = awarded.reduce((sum, item) => sum + (item.awardedQuantity || 0), 0);
+  return (
+    <div className="mt-1 flex items-center justify-end gap-1" aria-label={`获得奖励券 ${total} 张`}>
+      {awarded.slice(0, 2).map((item) => (
+        <span className="relative" key={item.id} title={`${item.name} ×${item.awardedQuantity}`}>
+          <RewardVisual icon={item.icon} imageUrl={item.imageUrl} theme={item.theme} size={25} />
+          {(item.awardedQuantity || 0) > 1 && <span className="absolute -bottom-1 -right-1 rounded-full bg-purple-600 px-1 text-[8px] font-black leading-3 text-white">×{item.awardedQuantity}</span>}
+        </span>
+      ))}
+      <span className="text-[10px] font-black text-purple-700">券×{total}</span>
+    </div>
+  );
 }
 
 export function TaskRewardSummary({

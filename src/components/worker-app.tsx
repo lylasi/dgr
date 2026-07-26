@@ -26,6 +26,7 @@ import { api, mutationId } from "@/components/api";
 import {
   activityIcon,
   AppHeader,
+  AwardedCouponMarks,
   awardedTaskRewardItems,
   Avatar,
   BottomNav,
@@ -732,23 +733,6 @@ function TasksPanel({
           </div>
         </section>
       )}
-    </div>
-  );
-}
-
-function AwardedCouponMarks({ items }: { items: Assignment["rewardItems"] }) {
-  const awarded = awardedTaskRewardItems(items);
-  if (awarded.length === 0) return null;
-  const total = awarded.reduce((sum, item) => sum + (item.awardedQuantity || 0), 0);
-  return (
-    <div className="mt-1 flex items-center justify-end gap-1" aria-label={`获得奖励券 ${total} 张`}>
-      {awarded.slice(0, 2).map((item) => (
-        <span className="relative" key={item.id} title={`${item.name} ×${item.awardedQuantity}`}>
-          <RewardVisual icon={item.icon} imageUrl={item.imageUrl} theme={item.theme} size={25} />
-          {(item.awardedQuantity || 0) > 1 && <span className="absolute -bottom-1 -right-1 rounded-full bg-purple-600 px-1 text-[8px] font-black leading-3 text-white">×{item.awardedQuantity}</span>}
-        </span>
-      ))}
-      <span className="text-[10px] font-black text-purple-700">券×{total}</span>
     </div>
   );
 }

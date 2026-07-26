@@ -4,7 +4,7 @@ import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ReviewPanel } from "@/components/admin-app";
-import type { AdminState, RewardItem, Transaction } from "@/components/types";
+import type { AdminState, Assignment, RewardItem, Transaction } from "@/components/types";
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -58,7 +58,7 @@ function transaction(): Transaction {
     actor: "admin",
     reason: "家长确认完成",
     rewardItemId: null,
-    assignmentId: null,
+    assignmentId: "assignment",
     startedAt: null,
     endedAt: null,
     createdAt: now + 1,
@@ -67,9 +67,81 @@ function transaction(): Transaction {
   };
 }
 
+function assignment(): Assignment {
+  return {
+    id: "assignment",
+    taskId: "task",
+    workerId: "worker",
+    title: "阅读奖励",
+    description: "完成本周阅读计划",
+    rewardSeconds: 1_800,
+    timingMode: "optional",
+    minimumDurationSeconds: null,
+    bonusEnabled: true,
+    excellentMultiplier: 2,
+    bonusCriteria: "讲清楚书里的主要内容",
+    dueAt: null,
+    status: "approved",
+    submissionNote: "读完并做了笔记",
+    reviewMultiplier: 1,
+    reviewTier: "normal",
+    reviewNote: "家长确认完成",
+    reviewedAt: now + 1,
+    claimedAt: now - 60_000,
+    submittedAt: now,
+    durationSeconds: 1_200,
+    rewardItems: [{
+      id: "assignment-reward",
+      definitionId: "definition",
+      definitionVersion: 1,
+      grantTier: "normal",
+      quantity: 2,
+      probabilityPercent: 100,
+      name: "测试奖励券",
+      description: "可以兑换十分钟时间",
+      icon: "gift",
+      theme: "purple",
+      kind: "fixed_time",
+      randomMinSeconds: null,
+      randomMaxSeconds: null,
+      fixedSeconds: 600,
+      physicalDescription: null,
+      fulfillmentInstructions: null,
+      imageUrl: null,
+      outcomeCount: 2,
+      awardedQuantity: 2,
+    }],
+  };
+}
+
 function adminState(): AdminState {
   return {
-    workers: [],
+    workers: [{
+      id: "worker",
+      familyId: "family",
+      name: "小林",
+      avatar: "star",
+      theme: "purple",
+      avatarUrl: null,
+      authVersion: 1,
+      balanceSeconds: 3_600,
+      dailyRewardSeconds: 0,
+      timezone: "Asia/Shanghai",
+      isActive: true,
+      activeTimer: null,
+      assignments: [assignment()],
+      pendingReviewCount: 0,
+      dailyCouponSetting: {
+        workerId: "worker",
+        isEnabled: false,
+        dailyQuantity: 1,
+        randomMinSeconds: 300,
+        randomMaxSeconds: 1_800,
+        updatedAt: now,
+      },
+      todayDailyCouponGrant: null,
+      availableRewardCount: 1,
+    }],
     tasks: [],
     reviews: [],
     rewardRequests: [],
@@ -122,9 +194,18 @@ describe("管理员审核历史", () => {
 
     const transactionRow = [...container.querySelectorAll("button")].find((button) => button.textContent?.includes("阅读奖励"));
     expect(transactionRow).toBeTruthy();
+    expect(transactionRow?.querySelector('[aria-label="获得奖励券 2 张"]')).toBeTruthy();
+    expect(transactionRow?.textContent).toContain("券×2");
     act(() => transactionRow!.click());
     const transactionDetail = container.querySelector('[aria-labelledby="admin-transaction-detail-title"]');
     expect(transactionDetail?.textContent).toContain("变化后余额");
     expect(transactionDetail?.textContent).toContain("家长确认完成");
+    expect(transactionDetail?.textContent).toContain("本次任务奖励计提");
+    expect(transactionDetail?.textContent).toContain("奖励券 2 张");
+    expect(transactionDetail?.textContent).toContain("测试奖励券");
+    expect(transactionDetail?.textContent).toContain("10 分钟固定时间");
+    expect(transactionDetail?.textContent).toContain("普通奖励");
+    expect(transactionDetail?.textContent).toContain("可以兑换十分钟时间");
+    expect(transactionDetail?.textContent).toContain("本次实际获得 2 张");
   });
 });

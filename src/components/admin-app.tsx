@@ -43,6 +43,8 @@ import {
   activityIcon,
   adminNavItems,
   AppHeader,
+  AwardedCouponMarks,
+  awardedTaskRewardItems,
   Avatar,
   AVATARS,
   BottomNav,
@@ -51,6 +53,7 @@ import {
   LiveClock,
   LoadingScreen,
   RewardVisual,
+  TaskRewardList,
   TaskRewardSummary,
   THEMES,
   TimeCoin,
@@ -1996,6 +1999,13 @@ const transactionTypeLabels: Record<Transaction["type"], string> = {
   coupon_reward: "奖励券入账",
 };
 
+function assignmentForTransaction(state: AdminState, item: Transaction) {
+  if (!item.assignmentId) return null;
+  return state.workers
+    .flatMap((worker) => worker.assignments)
+    .find((candidate) => candidate.id === item.assignmentId) || null;
+}
+
 export function AdminTransactionHistory({
   state,
   mutate,
@@ -2019,20 +2029,24 @@ export function AdminTransactionHistory({
         <span className="shrink-0 rounded-full bg-purple-100 px-2.5 py-1 text-xs font-black text-purple-700">最近 {recent.length} 条</span>
       </div>
       <div className="app-card divide-y divide-purple-50 overflow-hidden">
-        {recent.length === 0 ? <p className="p-4 text-center text-sm font-bold text-slate-500">还没有明细</p> : recent.map((item) => (
-          <button type="button" key={item.id} className="flex w-full items-center gap-3 p-3 text-left transition hover:bg-purple-50" onClick={() => setSelectedItemId(item.id)}>
-            <div className={`grid h-10 w-10 shrink-0 place-items-center rounded-2xl ${item.amountSeconds > 0 ? "bg-emerald-100 text-emerald-700" : "bg-orange-100 text-orange-700"}`}>{item.amountSeconds > 0 ? <TrendingUp size={21} /> : <TrendingDown size={21} />}</div>
-            <div className="min-w-0 flex-1">
-              <div className="flex min-w-0 items-center gap-1.5"><p className="truncate text-sm font-black">{item.workerName || "打工人"} · {item.title}</p>{item.isReversed && <span className="pill shrink-0 bg-slate-100 text-slate-500">已撤销</span>}</div>
-              <p className="mt-0.5 truncate text-xs font-semibold text-slate-500">{transactionTypeLabels[item.type]} · {formatDateTime(item.createdAt)}</p>
-            </div>
-            <div className="shrink-0 text-right">
-              <p className={`text-sm font-black ${item.amountSeconds > 0 ? "text-emerald-600" : "text-orange-600"}`}>{item.amountSeconds > 0 ? "+" : "−"}{formatDuration(Math.abs(item.amountSeconds), Math.abs(item.amountSeconds) < MINUTE)}</p>
-              <p className="mt-0.5 text-[10px] font-bold text-slate-400">查看详情</p>
-            </div>
-            <ChevronRight className="shrink-0 text-slate-300" size={17} />
-          </button>
-        ))}
+        {recent.length === 0 ? <p className="p-4 text-center text-sm font-bold text-slate-500">还没有明细</p> : recent.map((item) => {
+          const assignment = assignmentForTransaction(state, item);
+          const hasAwardedCoupons = Boolean(assignment && awardedTaskRewardItems(assignment.rewardItems).length > 0);
+          return (
+            <button type="button" key={item.id} className="flex w-full items-center gap-3 p-3 text-left transition hover:bg-purple-50" onClick={() => setSelectedItemId(item.id)}>
+              <div className={`grid h-10 w-10 shrink-0 place-items-center rounded-2xl ${item.amountSeconds > 0 ? "bg-emerald-100 text-emerald-700" : "bg-orange-100 text-orange-700"}`}>{item.amountSeconds > 0 ? <TrendingUp size={21} /> : <TrendingDown size={21} />}</div>
+              <div className="min-w-0 flex-1">
+                <div className="flex min-w-0 items-center gap-1.5"><p className="truncate text-sm font-black">{item.workerName || "打工人"} · {item.title}</p>{item.isReversed && <span className="pill shrink-0 bg-slate-100 text-slate-500">已撤销</span>}</div>
+                <p className="mt-0.5 truncate text-xs font-semibold text-slate-500">{transactionTypeLabels[item.type]} · {formatDateTime(item.createdAt)}</p>
+              </div>
+              <div className="shrink-0 text-right">
+                <p className={`text-sm font-black ${item.amountSeconds > 0 ? "text-emerald-600" : "text-orange-600"}`}>{item.amountSeconds > 0 ? "+" : "−"}{formatDuration(Math.abs(item.amountSeconds), Math.abs(item.amountSeconds) < MINUTE)}</p>
+                {hasAwardedCoupons && assignment ? <AwardedCouponMarks items={assignment.rewardItems} /> : <p className="mt-0.5 text-[10px] font-bold text-slate-400">查看详情</p>}
+              </div>
+              <ChevronRight className="shrink-0 text-slate-300" size={17} />
+            </button>
+          );
+        })}
       </div>
       {selectedItem && (
         <AdminTransactionDetailDialog
@@ -2065,9 +2079,9 @@ function AdminTransactionDetailDialog({
   onReverse: () => Promise<void>;
 }) {
   const rewardItem = item.rewardItemId ? state.rewardItems.find((candidate) => candidate.id === item.rewardItemId) || null : null;
-  const assignment = item.assignmentId
-    ? state.workers.flatMap((worker) => worker.assignments).find((candidate) => candidate.id === item.assignmentId) || null
-    : null;
+  const assignment = assignmentForTransaction(state, item);
+  const awardedItems = assignment ? awardedTaskRewardItems(assignment.rewardItems) : [];
+  const awardedQuantity = awardedItems.reduce((sum, reward) => sum + (reward.awardedQuantity || 0), 0);
   const relatedReversal = item.reversalOfTransactionId
     ? state.transactions.find((candidate) => candidate.id === item.reversalOfTransactionId) || null
     : state.transactions.find((candidate) => candidate.reversalOfTransactionId === item.id) || null;
@@ -2110,6 +2124,28 @@ function AdminTransactionDetailDialog({
           <div className="mt-2 space-y-1 rounded-xl bg-purple-50 px-3 py-2 text-xs font-semibold leading-5 text-purple-900">
             {assignment && <p><strong>关联任务：</strong>{assignment.title} · {assignmentStatusLabels[assignment.status]}</p>}
             {rewardItem && <p><strong>关联奖励券：</strong>{rewardItem.name}</p>}
+          </div>
+        )}
+
+        {assignment && item.type === "task_reward" && (
+          <div className="mt-2 rounded-xl border border-emerald-100 bg-emerald-50/60 p-2.5">
+            <div className="flex items-center justify-between gap-2">
+              <p className="text-sm font-black text-slate-800">本次任务奖励计提</p>
+              <span className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] font-black ${awardedQuantity > 0 ? "bg-purple-100 text-purple-700" : "bg-slate-100 text-slate-500"}`}>{awardedQuantity > 0 ? `奖励券 ${awardedQuantity} 张` : "只有时间币"}</span>
+            </div>
+            <div className="mt-2 grid grid-cols-3 gap-1.5 rounded-lg bg-white/80 px-2 py-2 text-center">
+              <div><p className="text-[10px] font-bold text-slate-500">基础时数</p><p className="mt-0.5 text-xs font-black text-slate-800">{formatDuration(assignment.rewardSeconds, false)}</p></div>
+              <div><p className="text-[10px] font-bold text-slate-500">审核结果</p><p className="mt-0.5 text-xs font-black text-slate-800">{assignment.reviewTier === "excellent" ? "优秀" : "正常"} ×{assignment.reviewMultiplier || 1}</p></div>
+              <div><p className="text-[10px] font-bold text-emerald-600">实际到账</p><p className="mt-0.5 text-xs font-black text-emerald-800">{formatDuration(Math.abs(item.amountSeconds), false)}</p></div>
+            </div>
+            {awardedItems.length > 0 ? (
+              <div className="mt-2">
+                <p className="mb-1 text-[11px] font-black text-slate-600">获得的奖励券 · {awardedItems.length} 种 / {awardedQuantity} 张</p>
+                <TaskRewardList items={awardedItems} showOutcomes compact showDescription showGrantTier />
+              </div>
+            ) : (
+              <p className="mt-2 rounded-lg bg-white/80 px-2.5 py-2 text-[11px] font-bold text-slate-500">本次没有获得额外奖励券。</p>
+            )}
           </div>
         )}
 
