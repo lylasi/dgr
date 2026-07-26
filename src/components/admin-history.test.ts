@@ -161,6 +161,17 @@ describe("管理员审核历史", () => {
   let root: Root;
 
   beforeEach(() => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({
+      ok: true,
+      data: {
+        items: [transaction()],
+        page: 1,
+        pageSize: 30,
+        total: 1,
+        totalPages: 1,
+        summary: { incomeSeconds: 1_800, spentSeconds: 0 },
+      },
+    }), { headers: { "Content-Type": "application/json" } })));
     container = document.createElement("div");
     document.body.appendChild(container);
     root = createRoot(container);
@@ -169,10 +180,11 @@ describe("管理员审核历史", () => {
   afterEach(() => {
     act(() => root.unmount());
     container.remove();
+    vi.unstubAllGlobals();
   });
 
-  it("在待审核列表下依次展示可点击的奖励历史和最近明细", () => {
-    act(() => {
+  it("在待审核列表下依次展示可点击的奖励历史和最近明细", async () => {
+    await act(async () => {
       root.render(createElement(ReviewPanel, {
         state: adminState(),
         busy: false,

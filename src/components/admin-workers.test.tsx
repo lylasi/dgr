@@ -78,6 +78,7 @@ describe("角色管理", () => {
 
   it("多角色使用紧凑列表，并通过弹窗改名和创建角色", async () => {
     const mutate = vi.fn(async () => true);
+    const onOpenLedger = vi.fn();
     act(() => {
       root.render(createElement(WorkersPanel, {
         state: state(),
@@ -86,10 +87,12 @@ describe("角色管理", () => {
         onQuickReward: vi.fn(),
         onDirectReward: vi.fn(),
         onEnterWorker: vi.fn(),
+        onOpenLedger,
       }));
     });
 
     expect(container.querySelectorAll('[aria-label^="打开 "][aria-label$=" 的角色设置"]')).toHaveLength(6);
+    expect(container.querySelectorAll('[aria-label^="查看 "][aria-label$=" 的明细"]')).toHaveLength(6);
     expect(container.querySelector('[aria-label="搜索角色"]')).toBeTruthy();
     expect(container.textContent).toContain("共 6 个角色 · 启用 5 · 停用 1");
     expect(container.textContent).not.toContain("上传照片头像");
@@ -105,6 +108,7 @@ describe("角色管理", () => {
     expect(settings?.querySelector('input[placeholder="设置新 PIN"]')).toBeTruthy();
     expect(settings?.textContent).toContain("发奖励券");
     expect(settings?.textContent).toContain("进入页面");
+    expect(settings?.textContent).toContain("查看明细");
 
     const nameInput = settings?.querySelector<HTMLInputElement>('[aria-label="角色名称"]');
     act(() => setInputValue(nameInput!, "新的角色名"));
@@ -115,7 +119,10 @@ describe("角色管理", () => {
       "角色名称已更新",
     );
 
-    act(() => container.querySelector<HTMLButtonElement>('[aria-label="关闭角色设置"]')!.click());
+    const openLedger = [...settings!.querySelectorAll("button")].find((button) => button.textContent?.includes("查看明细"));
+    act(() => openLedger!.click());
+    expect(onOpenLedger).toHaveBeenCalledWith("worker-1");
+
     expect(container.querySelector('[aria-labelledby="worker-settings-title"]')).toBeNull();
 
     const createButton = [...container.querySelectorAll("button")].find((button) => button.textContent?.includes("新角色"));

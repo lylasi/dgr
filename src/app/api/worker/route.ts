@@ -7,6 +7,7 @@ import {
   cancelConsumptionTimer,
   claimTask,
   getWorkerState,
+  listWorkerTransactions,
   manualConsumption,
   cancelRewardRequest,
   resubmitRewardRequest,
@@ -96,6 +97,21 @@ function credentialAttemptKey(request: NextRequest, workerId: string) {
 export async function GET(request: NextRequest) {
   try {
     const { context, workerId } = requireWorker(request);
+    if (request.nextUrl.searchParams.get("view") === "transactions") {
+      const query = z.object({
+        page: z.coerce.number().int().min(1).max(1_000_000).default(1),
+        pageSize: z.coerce.number().int().min(1).max(30).default(30),
+        type: z.enum(["daily_reward", "task_reward", "consumption", "admin_adjustment", "coupon_reward"]).optional(),
+        direction: z.enum(["income", "spent"]).optional(),
+        startDate: z.iso.date().optional(),
+        endDate: z.iso.date().optional(),
+        query: z.string().trim().max(100).optional(),
+      }).parse(Object.fromEntries(request.nextUrl.searchParams));
+      if (query.startDate && query.endDate && query.startDate > query.endDate) {
+        throw new AppError("结束日期不能早于开始日期。", 400, "INVALID_DATE_RANGE");
+      }
+      return jsonOk(listWorkerTransactions(context, workerId, query));
+    }
     return jsonOk(getWorkerState(context, workerId));
   } catch (error) {
     return jsonError(error);

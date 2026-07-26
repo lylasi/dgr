@@ -146,6 +146,13 @@ export function getWorkerState(workerId: string) {
   return service.getWorkerState(workerContext(workerId), workerId);
 }
 
+export function listWorkerTransactions(
+  workerId: string,
+  input?: Parameters<typeof service.listWorkerTransactions>[2],
+) {
+  return service.listWorkerTransactions(workerContext(workerId), workerId, input);
+}
+
 export function getAdminState() {
   return service.getAdminState(adminContext());
 }

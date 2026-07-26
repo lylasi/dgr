@@ -42,7 +42,7 @@ import {
   useLiveSeconds,
   workerNavItems,
 } from "@/components/shared";
-import type { Assignment, RewardItem, RewardRequest, Task, WorkerState } from "@/components/types";
+import type { Assignment, RewardItem, RewardRequest, Task, Transaction, TransactionPage, WorkerState } from "@/components/types";
 import { formatDateTime, formatDuration, MINUTE } from "@/lib/time";
 
 type WorkerTab = "home" | "tasks" | "rewards" | "ledger" | "me";
@@ -1447,14 +1447,155 @@ function PhysicalRewardConfirmDialog({
   );
 }
 
-function LedgerPanel({ state, onOpenTaskDetail }: { state: WorkerState; onOpenTaskDetail: (assignment: Assignment) => void }) {
-  const [filter, setFilter] = useState<"all" | "income" | "spent" | "daily">("all");
-  const rows = useMemo(() => state.transactions.filter((item) => filter === "all" || filter === "income" && item.amountSeconds > 0 || filter === "spent" && item.amountSeconds < 0 || filter === "daily" && item.type === "daily_reward"), [state.transactions, filter]);
+type LedgerFilters = {
+  query: string;
+  startDate: string;
+  endDate: string;
+  type: "" | Transaction["type"];
+  direction: "" | "income" | "spent";
+};
+
+const emptyLedgerFilters: LedgerFilters = { query: "", startDate: "", endDate: "", type: "", direction: "" };
+
+const quickLedgerFilters = [
+  { id: "all", label: "全部", type: "", direction: "" },
+  { id: "income", label: "收入", type: "", direction: "income" },
+  { id: "spent", label: "消耗", type: "", direction: "spent" },
+  { id: "daily", label: "每日奖励", type: "daily_reward", direction: "" },
+] as const;
+
+export function LedgerPanel({
+  state,
+  onOpenTaskDetail,
+  onOpenTransaction,
+  endpoint = "/api/worker",
+  requestWorkerId,
+}: {
+  state: Pick<WorkerState, "worker" | "transactions" | "assignments">;
+  onOpenTaskDetail?: (assignment: Assignment) => void;
+  onOpenTransaction?: (transaction: Transaction) => void;
+  endpoint?: string;
+  requestWorkerId?: string;
+}) {
+  const [draft, setDraft] = useState<LedgerFilters>(emptyLedgerFilters);
+  const [filters, setFilters] = useState<LedgerFilters>(emptyLedgerFilters);
+  const [page, setPage] = useState(1);
+  const [result, setResult] = useState<TransactionPage>(() => ({
+    items: state.transactions.slice(0, 30),
+    page: 1,
+    pageSize: 30,
+    total: state.transactions.length,
+    totalPages: 1,
+    summary: {
+      incomeSeconds: state.transactions.filter((item) => item.amountSeconds > 0).reduce((sum, item) => sum + item.amountSeconds, 0),
+      spentSeconds: Math.abs(state.transactions.filter((item) => item.amountSeconds < 0).reduce((sum, item) => sum + item.amountSeconds, 0)),
+    },
+  }));
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [showAdvancedFilters, setShowAdvancedFilters] = useState(false);
+  const latestTransactionId = state.transactions[0]?.id;
+
+  useEffect(() => {
+    let active = true;
+    const parameters = new URLSearchParams({ view: "transactions", page: String(page), pageSize: "30" });
+    if (requestWorkerId) parameters.set("workerId", requestWorkerId);
+    if (filters.query) parameters.set("query", filters.query);
+    if (filters.type) parameters.set("type", filters.type);
+    if (filters.direction) parameters.set("direction", filters.direction);
+    if (filters.startDate) parameters.set("startDate", filters.startDate);
+    if (filters.endDate) parameters.set("endDate", filters.endDate);
+    setLoading(true);
+    setError("");
+    void api<TransactionPage>(`${endpoint}?${parameters.toString()}`)
+      .then((data) => {
+        if (!active) return;
+        setResult(data);
+        if (page > data.totalPages) setPage(data.totalPages);
+      })
+      .catch((loadError) => {
+        if (active) setError(messageOf(loadError));
+      })
+      .finally(() => {
+        if (active) setLoading(false);
+      });
+    return () => { active = false; };
+  }, [endpoint, filters, latestTransactionId, page, requestWorkerId]);
+
+  const rows = result.items;
+  const hasFilters = Boolean(filters.query || filters.startDate || filters.endDate || filters.type || filters.direction);
+  const activeQuickFilter = quickLedgerFilters.find((item) => item.type === filters.type && item.direction === filters.direction)?.id || null;
+  const advancedFilterCount = [filters.query, filters.startDate, filters.endDate, filters.type && filters.type !== "daily_reward" ? filters.type : ""].filter(Boolean).length;
+
+  function applyQuickFilter(item: (typeof quickLedgerFilters)[number]) {
+    const next = { type: item.type as LedgerFilters["type"], direction: item.direction as LedgerFilters["direction"] };
+    setError("");
+    setPage(1);
+    setDraft((value) => ({ ...value, ...next }));
+    setFilters((value) => ({ ...value, ...next }));
+  }
+
   return (
     <div className="space-y-4">
-      <section className="app-card grid grid-cols-3 gap-2 p-4 text-center"><div><p className="text-xs font-bold text-slate-500">当前余额</p><p className="mt-1 text-sm font-black text-purple-700">{formatDuration(state.worker.balanceSeconds, false)}</p></div><div><p className="text-xs font-bold text-slate-500">累计收入</p><p className="mt-1 text-sm font-black text-emerald-700">{formatDuration(state.transactions.filter((x) => x.amountSeconds > 0).reduce((a, b) => a + b.amountSeconds, 0), false)}</p></div><div><p className="text-xs font-bold text-slate-500">累计消耗</p><p className="mt-1 text-sm font-black text-orange-700">{formatDuration(Math.abs(state.transactions.filter((x) => x.amountSeconds < 0).reduce((a, b) => a + b.amountSeconds, 0)), false)}</p></div></section>
-      <div className="flex gap-2 overflow-x-auto pb-1">{([['all','全部'],['income','收入'],['spent','消耗'],['daily','每日奖励']] as const).map(([id,label]) => <button key={id} className={`min-h-11 shrink-0 rounded-full px-4 text-sm font-black ${filter === id ? "bg-purple-600 text-white" : "bg-white text-slate-600 shadow-sm"}`} onClick={() => setFilter(id)}>{label}</button>)}</div>
-      {rows.length === 0 ? <EmptyState title="还没有明细" text="奖励和消耗记录会出现在这里。" /> : (
+      <section className="app-card grid grid-cols-3 gap-2 p-4 text-center"><div><p className="text-xs font-bold text-slate-500">当前余额</p><p className="mt-1 text-sm font-black text-purple-700">{formatDuration(state.worker.balanceSeconds, false)}</p></div><div><p className="text-xs font-bold text-slate-500">累计收入</p><p className="mt-1 text-sm font-black text-emerald-700">{formatDuration(result.summary.incomeSeconds, false)}</p></div><div><p className="text-xs font-bold text-slate-500">累计消耗</p><p className="mt-1 text-sm font-black text-orange-700">{formatDuration(result.summary.spentSeconds, false)}</p></div></section>
+
+      <div className="flex gap-2 overflow-x-auto pb-1" aria-label="快捷筛选">
+        {quickLedgerFilters.map((item) => (
+          <button
+            key={item.id}
+            type="button"
+            aria-pressed={activeQuickFilter === item.id}
+            className={`min-h-11 shrink-0 rounded-full px-4 text-sm font-black transition ${activeQuickFilter === item.id ? "bg-purple-600 text-white" : "bg-white text-slate-600 shadow-sm"}`}
+            disabled={loading}
+            onClick={() => applyQuickFilter(item)}
+          >
+            {item.label}
+          </button>
+        ))}
+        <button
+          type="button"
+          aria-expanded={showAdvancedFilters}
+          aria-controls="ledger-advanced-search"
+          className={`min-h-11 shrink-0 rounded-full px-4 text-sm font-black shadow-sm transition ${showAdvancedFilters || advancedFilterCount > 0 ? "bg-purple-100 text-purple-700" : "bg-white text-slate-600"}`}
+          onClick={() => setShowAdvancedFilters((value) => !value)}
+        >
+          更多搜索{advancedFilterCount > 0 ? ` · ${advancedFilterCount}` : ""}
+          {showAdvancedFilters ? <ChevronUp className="ml-1 inline" size={17} /> : <ChevronDown className="ml-1 inline" size={17} />}
+        </button>
+      </div>
+
+      {showAdvancedFilters && (
+        <form
+          id="ledger-advanced-search"
+          className="app-card space-y-3 p-4"
+          onSubmit={(event) => {
+            event.preventDefault();
+            if (draft.startDate && draft.endDate && draft.startDate > draft.endDate) {
+              setError("结束日期不能早于开始日期。");
+              return;
+            }
+            setError("");
+            setPage(1);
+            setFilters({ ...draft, query: draft.query.trim() });
+          }}
+        >
+          <div className="grid gap-3 sm:grid-cols-2">
+            <label className="sm:col-span-2"><span className="label">搜索明细</span><input className="field" type="search" value={draft.query} maxLength={100} placeholder="搜索标题或说明" onChange={(event) => setDraft((value) => ({ ...value, query: event.target.value }))} /></label>
+            <label><span className="label">开始日期</span><input className="field" type="date" value={draft.startDate} onChange={(event) => setDraft((value) => ({ ...value, startDate: event.target.value }))} /></label>
+            <label><span className="label">结束日期</span><input className="field" type="date" value={draft.endDate} onChange={(event) => setDraft((value) => ({ ...value, endDate: event.target.value }))} /></label>
+            <label><span className="label">明细类型</span><select className="field" value={draft.type} onChange={(event) => setDraft((value) => ({ ...value, type: event.target.value as LedgerFilters["type"] }))}><option value="">全部类型</option><option value="daily_reward">每日奖励</option><option value="task_reward">任务奖励</option><option value="coupon_reward">奖励券入账</option><option value="consumption">时间消耗</option><option value="admin_adjustment">余额调整</option></select></label>
+            <label><span className="label">收支方向</span><select className="field" value={draft.direction} onChange={(event) => setDraft((value) => ({ ...value, direction: event.target.value as LedgerFilters["direction"] }))}><option value="">全部收支</option><option value="income">收入</option><option value="spent">消耗</option></select></label>
+          </div>
+          <div className="grid grid-cols-2 gap-2">
+            <button className="primary-button" disabled={loading}>{loading ? "查询中…" : "搜索"}</button>
+            <button type="button" className="secondary-button" disabled={loading || (!hasFilters && Object.values(draft).every((value) => !value))} onClick={() => { setDraft(emptyLedgerFilters); setFilters(emptyLedgerFilters); setPage(1); }}>清除条件</button>
+          </div>
+        </form>
+      )}
+
+      {error && <p role="alert" className="rounded-xl bg-red-50 px-3 py-2 text-sm font-bold text-red-700">{error}</p>}
+      <div className="flex items-center justify-between gap-3 px-1 text-sm font-bold text-slate-500"><span>{hasFilters ? `找到 ${result.total} 条` : `共 ${result.total} 条明细`}</span><span>每页最多 30 条</span></div>
+      {!loading && rows.length === 0 ? <EmptyState title={hasFilters ? "没有找到匹配明细" : "还没有明细"} text={hasFilters ? "换个日期、类型或关键词再试试。" : "奖励和消耗记录会出现在这里。"} /> : (
         <div className="app-card divide-y divide-purple-50 overflow-hidden">
           {rows.map((item) => {
             const assignment = item.assignmentId
@@ -1470,16 +1611,25 @@ function LedgerPanel({ state, onOpenTaskDetail }: { state: WorkerState; onOpenTa
                     {assignment && <p className="mt-0.5 text-[11px] font-black text-purple-700">点开查看完整任务计提</p>}
                   </div>
                 </div>
-                <div className={`shrink-0 text-right text-sm font-black ${item.amountSeconds > 0 ? "text-emerald-600" : "text-orange-600"}`}><p>{item.amountSeconds > 0 ? "+" : "−"}{formatDuration(Math.abs(item.amountSeconds), Math.abs(item.amountSeconds) < MINUTE)}</p><p className="mt-0.5 text-[10px] text-slate-400">余额 {formatDuration(item.balanceAfterSeconds, false)}</p></div>
+                <div className={`shrink-0 text-right text-sm font-black ${item.amountSeconds > 0 ? "text-emerald-600" : "text-orange-600"}`}><p>{item.amountSeconds > 0 ? "+" : "−"}{formatDuration(Math.abs(item.amountSeconds), Math.abs(item.amountSeconds) < MINUTE)}</p>{assignment && awardedTaskRewardItems(assignment.rewardItems).length > 0 && <AwardedCouponMarks items={assignment.rewardItems} />}<p className="mt-0.5 text-[10px] text-slate-400">余额 {formatDuration(item.balanceAfterSeconds, false)}</p></div>
               </>
             );
-            return assignment ? (
+            return onOpenTransaction ? (
+              <button key={item.id} type="button" className="flex w-full items-center justify-between gap-3 p-3 text-left transition hover:bg-purple-50" onClick={() => onOpenTransaction(item)}>{content}</button>
+            ) : assignment && onOpenTaskDetail ? (
               <button key={item.id} type="button" className="flex w-full items-center justify-between gap-3 p-3 text-left transition hover:bg-purple-50" onClick={() => onOpenTaskDetail(assignment)}>{content}</button>
             ) : (
               <div className="flex items-center justify-between gap-3 p-3" key={item.id}>{content}</div>
             );
           })}
         </div>
+      )}
+      {result.totalPages > 1 && (
+        <nav className="app-card flex items-center justify-between gap-3 p-3" aria-label="明细分页">
+          <button type="button" className="secondary-button !min-h-10 !px-4" disabled={loading || page <= 1} onClick={() => setPage((value) => Math.max(1, value - 1))}>上一页</button>
+          <span className="text-sm font-black text-slate-600">第 {result.page} / {result.totalPages} 页</span>
+          <button type="button" className="secondary-button !min-h-10 !px-4" disabled={loading || page >= result.totalPages} onClick={() => setPage((value) => Math.min(result.totalPages, value + 1))}>下一页</button>
+        </nav>
       )}
     </div>
   );

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { clampSeconds, dateKey, elapsedSeconds, formatClock, formatDuration, HOUR } from "@/lib/time";
+import { clampSeconds, dateKey, dateStartTimestamp, elapsedSeconds, formatClock, formatDuration, HOUR, nextDateKey } from "@/lib/time";
 
 describe("time helpers", () => {
   it("formats durations consistently", () => {
@@ -17,6 +17,8 @@ describe("time helpers", () => {
     const timestamp = Date.UTC(2026, 6, 18, 16, 30);
     expect(dateKey(timestamp, "Asia/Shanghai")).toBe("2026-07-19");
     expect(dateKey(timestamp, "UTC")).toBe("2026-07-18");
+    expect(dateStartTimestamp("2026-07-19", "Asia/Shanghai")).toBe(Date.UTC(2026, 6, 18, 16));
+    expect(nextDateKey("2026-12-31")).toBe("2027-01-01");
   });
 
   it("clamps configured reward values", () => {

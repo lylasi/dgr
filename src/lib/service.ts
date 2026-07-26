@@ -30,7 +30,7 @@ import {
   snapshotAssignmentRewardsWithin,
   type TaskRewardBindingInput,
 } from "@/lib/reward-service";
-import { dateKey, elapsedSeconds } from "@/lib/time";
+import { dateKey, dateStartTimestamp, elapsedSeconds, nextDateKey } from "@/lib/time";
 
 type Db = Database.Database;
 
@@ -572,6 +572,83 @@ function publicTransaction(row: TransactionRow, workerName?: string) {
     createdAt: row.created_at,
     isReversed: Boolean(row.is_reversed),
     reversalOfTransactionId: row.reversal_of_transaction_id || null,
+  };
+}
+
+export type TransactionQuery = {
+  page?: number;
+  pageSize?: number;
+  type?: TransactionRow["type"];
+  direction?: "income" | "spent";
+  startDate?: string;
+  endDate?: string;
+  query?: string;
+};
+
+export function listWorkerTransactions(
+  context: FamilyBusinessContext,
+  workerId: string,
+  input: TransactionQuery = {},
+) {
+  assertActorCanManageWorker(context, workerId);
+  const db = getDb();
+  const page = Math.max(1, Math.trunc(input.page || 1));
+  const pageSize = Math.min(30, Math.max(1, Math.trunc(input.pageSize || 30)));
+  const where = ["tr.family_id = ?", "tr.worker_id = ?"];
+  const parameters: Array<string | number> = [context.familyId, workerId];
+  const worker = getWorkerRow(db, context.familyId, workerId);
+
+  if (input.type) {
+    where.push("tr.type = ?");
+    parameters.push(input.type);
+  }
+  if (input.direction === "income") where.push("tr.amount_seconds > 0");
+  if (input.direction === "spent") where.push("tr.amount_seconds < 0");
+  if (input.startDate) {
+    where.push("tr.created_at >= ?");
+    parameters.push(dateStartTimestamp(input.startDate, worker.timezone));
+  }
+  if (input.endDate) {
+    where.push("tr.created_at < ?");
+    parameters.push(dateStartTimestamp(nextDateKey(input.endDate), worker.timezone));
+  }
+  const query = input.query?.trim();
+  if (query) {
+    const pattern = `%${query.replace(/[\\%_]/g, "\\$&")}%`;
+    where.push("(tr.title LIKE ? ESCAPE '\\' OR COALESCE(tr.reason, '') LIKE ? ESCAPE '\\')");
+    parameters.push(pattern, pattern);
+  }
+
+  const whereSql = where.join(" AND ");
+  const count = db.prepare(`SELECT COUNT(*) AS total FROM transactions tr WHERE ${whereSql}`)
+    .get(...parameters) as { total: number };
+  const rows = db.prepare(`
+    SELECT tr.*,
+      EXISTS(SELECT 1 FROM transaction_reversals rv WHERE rv.original_transaction_id = tr.id) AS is_reversed,
+      (SELECT rv.original_transaction_id FROM transaction_reversals rv WHERE rv.reversal_transaction_id = tr.id) AS reversal_of_transaction_id
+    FROM transactions tr
+    WHERE ${whereSql}
+    ORDER BY tr.created_at DESC, tr.id DESC
+    LIMIT ? OFFSET ?
+  `).all(...parameters, pageSize, (page - 1) * pageSize) as TransactionRow[];
+  const summary = db.prepare(`
+    SELECT
+      COALESCE(SUM(CASE WHEN amount_seconds > 0 THEN amount_seconds ELSE 0 END), 0) AS income_seconds,
+      COALESCE(SUM(CASE WHEN amount_seconds < 0 THEN -amount_seconds ELSE 0 END), 0) AS spent_seconds
+    FROM transactions
+    WHERE family_id = ? AND worker_id = ?
+  `).get(context.familyId, workerId) as { income_seconds: number; spent_seconds: number };
+
+  return {
+    items: rows.map((row) => publicTransaction(row)),
+    page,
+    pageSize,
+    total: count.total,
+    totalPages: Math.max(1, Math.ceil(count.total / pageSize)),
+    summary: {
+      incomeSeconds: summary.income_seconds,
+      spentSeconds: summary.spent_seconds,
+    },
   };
 }
 
@@ -2029,11 +2106,22 @@ export function getWorkerState(context: FamilyBusinessContext, workerId: string)
         (SELECT rv.original_transaction_id FROM transaction_reversals rv WHERE rv.reversal_transaction_id = tr.id) AS reversal_of_transaction_id
       FROM transactions tr
       WHERE tr.family_id = ? AND tr.worker_id = ?
-      ORDER BY tr.created_at DESC LIMIT 100
+      ORDER BY tr.created_at DESC LIMIT 30
     `)
     .all(context.familyId, workerId) as TransactionRow[]).map((row) => publicTransaction(row));
   const today = dateKey(now, worker.timezone);
-  const todayTransactions = transactions.filter((row) => dateKey(row.createdAt, worker.timezone) === today);
+  const todaySummary = db.prepare(`
+    SELECT
+      COALESCE(SUM(CASE WHEN amount_seconds > 0 THEN amount_seconds ELSE 0 END), 0) AS income_seconds,
+      COALESCE(SUM(CASE WHEN amount_seconds < 0 THEN -amount_seconds ELSE 0 END), 0) AS spent_seconds
+    FROM transactions
+    WHERE family_id = ? AND worker_id = ? AND created_at >= ? AND created_at < ?
+  `).get(
+    context.familyId,
+    workerId,
+    dateStartTimestamp(today, worker.timezone),
+    dateStartTimestamp(nextDateKey(today), worker.timezone),
+  ) as { income_seconds: number; spent_seconds: number };
   const pendingRewardSeconds = assignments
     .filter((assignment) => assignment.status === "submitted")
     .reduce((total, assignment) => total + assignment.rewardSeconds, 0)
@@ -2055,12 +2143,8 @@ export function getWorkerState(context: FamilyBusinessContext, workerId: string)
     transactions,
     ...rewardState,
     summary: {
-      todayIncomeSeconds: todayTransactions
-        .filter((row) => row.amountSeconds > 0)
-        .reduce((sum, row) => sum + row.amountSeconds, 0),
-      todaySpentSeconds: todayTransactions
-        .filter((row) => row.amountSeconds < 0)
-        .reduce((sum, row) => sum + Math.abs(row.amountSeconds), 0),
+      todayIncomeSeconds: todaySummary.income_seconds,
+      todaySpentSeconds: todaySummary.spent_seconds,
       pendingRewardSeconds,
       dailyGrantAmountSeconds: dailyGrant?.amount_seconds ?? null,
     },

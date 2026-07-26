@@ -474,6 +474,7 @@ export const adminNavItems = [
   { id: "home" as const, label: "总览", icon: Home },
   { id: "publish" as const, label: "发布", icon: ListChecks },
   { id: "reviews" as const, label: "审核", icon: ShieldCheck },
+  { id: "ledger" as const, label: "明细", icon: Award },
   { id: "workers" as const, label: "角色", icon: UserRound },
   { id: "settings" as const, label: "设置", icon: Settings },
 ];

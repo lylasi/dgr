@@ -1,4 +1,5 @@
 import type { NextRequest } from "next/server";
+import { z } from "zod";
 import {
   getAuthorizedBossContext,
   getBossPortalState,
@@ -9,7 +10,7 @@ import {
   familyBusinessMutationSchema,
 } from "@/lib/family-business-mutations";
 import { AppError, jsonError, jsonOk } from "@/lib/http";
-import { getAdminState } from "@/lib/service";
+import { getAdminState, listWorkerTransactions } from "@/lib/service";
 import { getRequestSession } from "@/lib/session";
 
 export const runtime = "nodejs";
@@ -48,7 +49,24 @@ function getBossBusinessState(context: ReturnType<typeof requireBoss>) {
 
 export async function GET(request: NextRequest) {
   try {
-    return jsonOk(getBossBusinessState(requireBoss(request)));
+    const context = requireBoss(request);
+    if (request.nextUrl.searchParams.get("view") === "transactions") {
+      const query = z.object({
+        workerId: z.string().uuid(),
+        page: z.coerce.number().int().min(1).max(1_000_000).default(1),
+        pageSize: z.coerce.number().int().min(1).max(30).default(30),
+        type: z.enum(["daily_reward", "task_reward", "consumption", "admin_adjustment", "coupon_reward"]).optional(),
+        direction: z.enum(["income", "spent"]).optional(),
+        startDate: z.iso.date().optional(),
+        endDate: z.iso.date().optional(),
+        query: z.string().trim().max(100).optional(),
+      }).parse(Object.fromEntries(request.nextUrl.searchParams));
+      if (query.startDate && query.endDate && query.startDate > query.endDate) {
+        throw new AppError("结束日期不能早于开始日期。", 400, "INVALID_DATE_RANGE");
+      }
+      return jsonOk(listWorkerTransactions(context.businessContext, query.workerId, query));
+    }
+    return jsonOk(getBossBusinessState(context));
   } catch (error) {
     return jsonError(error);
   }

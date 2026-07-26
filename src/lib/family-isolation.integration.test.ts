@@ -3,7 +3,7 @@ import path from "node:path";
 import { NextRequest } from "next/server";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { GET as avatarGet } from "@/app/api/avatar/[workerId]/route";
-import { POST as bossPost } from "@/app/api/boss/route";
+import { GET as bossGet, POST as bossPost } from "@/app/api/boss/route";
 import { GET as bootstrapGet } from "@/app/api/bootstrap/route";
 import { GET as rewardImageGet } from "@/app/api/reward-image/[imageId]/route";
 import { POST as workerPost } from "@/app/api/worker/route";
@@ -437,6 +437,19 @@ describe.sequential("explicit family business isolation", () => {
     }));
     expect(crossBossMutation.status).toBe(404);
     expect(await bodyOf(crossBossMutation)).toMatchObject({
+      ok: false,
+      error: { code: "WORKER_NOT_FOUND" },
+    });
+
+    const ownLedger = await bossGet(apiRequest(`/api/boss?view=transactions&workerId=${workerA}&pageSize=30`, bossCookieA));
+    expect(ownLedger.status).toBe(200);
+    expect(await bodyOf(ownLedger)).toMatchObject({
+      ok: true,
+      data: { page: 1, pageSize: 30 },
+    });
+    const crossFamilyLedger = await bossGet(apiRequest(`/api/boss?view=transactions&workerId=${workerB}`, bossCookieA));
+    expect(crossFamilyLedger.status).toBe(404);
+    expect(await bodyOf(crossFamilyLedger)).toMatchObject({
       ok: false,
       error: { code: "WORKER_NOT_FOUND" },
     });

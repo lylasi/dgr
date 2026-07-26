@@ -14,6 +14,7 @@ import {
   getWorkerState,
   getWorkerAvatarImage,
   grantQuickReward,
+  listWorkerTransactions,
   manualConsumption,
   removeWorkerAvatarImage,
   resubmitRewardRequest,
@@ -782,5 +783,50 @@ describe.sequential("SQLite business flow", () => {
     expect(dashboard.workers).toHaveLength(3);
     expect(dashboard.tasks).toHaveLength(3);
     expect(dashboard.reviews).toHaveLength(0);
+  });
+
+  it("paginates and searches worker transactions with a hard 30-row limit", () => {
+    const createdAt = Date.UTC(2026, 6, 10, 16, 30);
+    const insert = getDb().prepare(`
+      INSERT INTO transactions(
+        id, family_id, worker_id, type, title, amount_seconds, balance_after_seconds,
+        actor, actor_type, reason, request_id, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, 'system', 'system', ?, ?, ?)
+    `);
+    for (let index = 0; index < 35; index += 1) {
+      insert.run(
+        `ledger-page-${index}`,
+        DEFAULT_FAMILY_ID,
+        featureWorkerId,
+        index % 3 === 0 ? "consumption" : "admin_adjustment",
+        `分页专用记录 ${String(index).padStart(2, "0")}`,
+        index % 3 === 0 ? -60 : 60,
+        100 * MINUTE,
+        index === 7 ? "字面量 %_ 搜索" : "分页筛选测试",
+        `ledger-page-request-${index}`,
+        createdAt + index,
+      );
+    }
+
+    const first = listWorkerTransactions(featureWorkerId, { query: "分页专用", pageSize: 100 });
+    expect(first.items).toHaveLength(30);
+    expect(first.pageSize).toBe(30);
+    expect(first.total).toBe(35);
+    expect(first.totalPages).toBe(2);
+
+    const second = listWorkerTransactions(featureWorkerId, { query: "分页专用", page: 2 });
+    expect(second.items).toHaveLength(5);
+    expect(new Set([...first.items, ...second.items].map((item) => item.id)).size).toBe(35);
+
+    const filtered = listWorkerTransactions(featureWorkerId, {
+      query: "分页专用",
+      type: "consumption",
+      direction: "spent",
+      startDate: "2026-07-11",
+      endDate: "2026-07-11",
+    });
+    expect(filtered.total).toBe(12);
+    expect(filtered.items.every((item) => item.type === "consumption" && item.amountSeconds < 0)).toBe(true);
+    expect(listWorkerTransactions(featureWorkerId, { query: "%_" }).total).toBe(1);
   });
 });

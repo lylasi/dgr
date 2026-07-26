@@ -32,6 +32,7 @@ import {
 } from "lucide-react";
 import { FormEvent, useCallback, useEffect, useState, type ChangeEvent } from "react";
 import { api, copyText, mutationId } from "@/components/api";
+import { LedgerPanel } from "@/components/worker-app";
 import { FamilyEntryQr } from "@/components/family-entry-qr";
 import {
   AdminRewardHistoryPanel,
@@ -72,7 +73,7 @@ import type {
 } from "@/components/types";
 import { formatDateTime, formatDuration, HOUR, MINUTE } from "@/lib/time";
 
-type AdminTab = "home" | "publish" | "reviews" | "workers" | "settings";
+type AdminTab = "home" | "publish" | "reviews" | "ledger" | "workers" | "settings";
 
 const taskPresets = [
   { title: "读书", description: "认真阅读，并说说今天学到了什么。", minutes: 30, icon: BookOpen },
@@ -179,6 +180,7 @@ export function AdminApp({
   const [quickRewardWorkerId, setQuickRewardWorkerId] = useState<string | null>(null);
   const [rewardWorkerId, setRewardWorkerId] = useState<string | null>(null);
   const [quickTimerWorkerId, setQuickTimerWorkerId] = useState<string | null>(null);
+  const [ledgerWorkerId, setLedgerWorkerId] = useState<string | null>(null);
   const [toast, setToast] = useState<{ message: string; tone: "success" | "error" } | null>(null);
 
   const load = useCallback(async (quiet = false) => {
@@ -251,6 +253,11 @@ export function AdminApp({
     }
   }
 
+  function openLedger(workerId: string) {
+    setLedgerWorkerId(workerId);
+    setTab("ledger");
+  }
+
   if (!state) return <LoadingScreen />;
 
   const nav = adminNavItems.map((item) =>
@@ -287,10 +294,11 @@ export function AdminApp({
             </select>
           )}
         </section>
-        {tab === "home" && <AdminHome state={state} setTab={setTab} mutate={mutate} busy={busy} onQuickReward={(workerId) => setQuickRewardWorkerId(workerId || "")} onDirectReward={setRewardWorkerId} onQuickTimer={setQuickTimerWorkerId} onEnterWorker={(workerId) => void openWorker(workerId)} />}
+        {tab === "home" && <AdminHome state={state} setTab={setTab} mutate={mutate} busy={busy} onQuickReward={(workerId) => setQuickRewardWorkerId(workerId || "")} onDirectReward={setRewardWorkerId} onQuickTimer={setQuickTimerWorkerId} onEnterWorker={(workerId) => void openWorker(workerId)} onOpenLedger={openLedger} />}
         {tab === "publish" && <PublishPanel state={state} mutate={mutate} busy={busy} />}
-        {tab === "reviews" && <ReviewPanel state={state} mutate={mutate} busy={busy} />}
-        {tab === "workers" && <WorkersPanel state={state} mutate={mutate} busy={busy} onQuickReward={setQuickRewardWorkerId} onDirectReward={setRewardWorkerId} onEnterWorker={(workerId) => void openWorker(workerId)} />}
+        {tab === "reviews" && <ReviewPanel state={state} mutate={mutate} busy={busy} endpoint={endpoint} />}
+        {tab === "ledger" && <AdminLedgerPanel state={state} endpoint={endpoint} mutate={mutate} busy={busy} initialWorkerId={ledgerWorkerId} />}
+        {tab === "workers" && <WorkersPanel state={state} mutate={mutate} busy={busy} onQuickReward={setQuickRewardWorkerId} onDirectReward={setRewardWorkerId} onEnterWorker={(workerId) => void openWorker(workerId)} onOpenLedger={openLedger} />}
         {tab === "settings" && (
           <AdminSettings
             state={state}
@@ -333,6 +341,76 @@ export function AdminApp({
   );
 }
 
+export function AdminLedgerPanel({
+  state,
+  endpoint = "/api/boss",
+  mutate,
+  busy = false,
+  initialWorkerId,
+  title = "打工人明细",
+}: {
+  state: AdminState;
+  endpoint?: string;
+  mutate?: (body: Record<string, unknown>, success: string) => Promise<boolean>;
+  busy?: boolean;
+  initialWorkerId?: string | null;
+  title?: string;
+}) {
+  const [workerId, setWorkerId] = useState(() => initialWorkerId && state.workers.some((worker) => worker.id === initialWorkerId)
+    ? initialWorkerId
+    : state.workers.find((worker) => worker.isActive)?.id || state.workers[0]?.id || "");
+  const [selectedItem, setSelectedItem] = useState<Transaction | null>(null);
+  const selectedWorker = state.workers.find((worker) => worker.id === workerId) || state.workers[0] || null;
+
+  useEffect(() => {
+    if (initialWorkerId) setWorkerId(initialWorkerId);
+  }, [initialWorkerId]);
+
+  if (!selectedWorker) {
+    return <EmptyState title="还没有打工人" text="创建打工人后，就可以在这里查看明细。" />;
+  }
+
+  return (
+    <div className="space-y-4">
+      <section>
+        <SectionTitle
+          title={title}
+          text="可按打工人、收支、日期和类型筛选"
+          action={(
+            <select className="field !min-h-10 !w-auto max-w-44 py-1.5 text-sm" aria-label="选择明细打工人" value={selectedWorker.id} onChange={(event) => { setWorkerId(event.target.value); setSelectedItem(null); }}>
+            {state.workers.map((worker) => <option key={worker.id} value={worker.id}>{worker.name}{worker.isActive ? "" : "（已停用）"}</option>)}
+            </select>
+          )}
+        />
+      </section>
+      <LedgerPanel
+        key={selectedWorker.id}
+        state={{
+          worker: selectedWorker,
+          assignments: selectedWorker.assignments,
+          transactions: state.transactions.filter((item) => item.workerId === selectedWorker.id),
+        }}
+        endpoint={endpoint}
+        requestWorkerId={selectedWorker.id}
+        onOpenTransaction={(item) => setSelectedItem({ ...item, workerName: selectedWorker.name })}
+      />
+      {selectedItem && (
+        <AdminTransactionDetailDialog
+          item={selectedItem}
+          state={state}
+          busy={busy}
+          onClose={() => setSelectedItem(null)}
+          onReverse={async () => {
+            if (!mutate || !window.confirm(`确定撤销 ${selectedWorker.name} 的“${selectedItem.title}”吗？将原额退回。`)) return;
+            const ok = await mutate({ action: "reverse_consumption", transactionId: selectedItem.id, reason: "老板确认是误触消耗" }, "消耗已撤销，时数已原额退回");
+            if (ok) setSelectedItem(null);
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
 function SectionTitle({ title, text, action }: { title: string; text?: string; action?: React.ReactNode }) {
   return (
     <div className="mb-3 flex items-end justify-between gap-3">
@@ -354,6 +432,7 @@ function AdminHome({
   onDirectReward,
   onQuickTimer,
   onEnterWorker,
+  onOpenLedger,
 }: {
   state: AdminState;
   setTab: (tab: AdminTab) => void;
@@ -363,6 +442,7 @@ function AdminHome({
   onDirectReward: (workerId: string) => void;
   onQuickTimer: (workerId: string) => void;
   onEnterWorker: (workerId: string) => void;
+  onOpenLedger: (workerId: string) => void;
 }) {
   const activeWorkers = state.workers.filter((worker) => worker.isActive);
   const running = activeWorkers.filter((worker) => worker.activeTimer);
@@ -438,7 +518,16 @@ function AdminHome({
                         <div className="mt-1 text-sm text-slate-600"><TimeCoin seconds={worker.balanceSeconds} compact /></div>
                       </div>
                     </div>
-                    <div className="grid shrink-0 grid-cols-2 gap-2 sm:grid-cols-4">
+                    <div className="grid shrink-0 grid-cols-3 gap-2 sm:grid-cols-5">
+                      <button
+                        type="button"
+                        className="secondary-button !min-h-10 !rounded-xl !px-2 text-xs sm:!px-3"
+                        disabled={busy}
+                        aria-label={`查看 ${worker.name} 的明细`}
+                        onClick={() => onOpenLedger(worker.id)}
+                      >
+                        <Award className="mr-1 inline" size={16} />明细
+                      </button>
                       <button
                         type="button"
                         className="primary-button !min-h-10 !rounded-xl !px-2 text-xs sm:!px-3"
@@ -1452,10 +1541,12 @@ export function ReviewPanel({
   state,
   mutate,
   busy,
+  endpoint = "/api/boss",
 }: {
   state: AdminState;
   mutate: (body: Record<string, unknown>, success: string) => Promise<boolean>;
   busy: boolean;
+  endpoint?: string;
 }) {
   const [notes, setNotes] = useState<Record<string, string>>({});
   const [durationMinutes, setDurationMinutes] = useState<Record<string, string>>({});
@@ -1591,7 +1682,7 @@ export function ReviewPanel({
       )}
 
       <AdminRewardHistoryPanel state={state} mutate={mutate} busy={busy} />
-      <AdminTransactionHistory state={state} mutate={mutate} busy={busy} />
+      <AdminLedgerPanel state={state} endpoint={endpoint} mutate={mutate} busy={busy} title="最近明细" />
     </div>
   );
 }
@@ -1658,6 +1749,7 @@ export function WorkersPanel({
   onQuickReward,
   onDirectReward,
   onEnterWorker,
+  onOpenLedger,
 }: {
   state: AdminState;
   mutate: (body: Record<string, unknown>, success: string) => Promise<boolean>;
@@ -1665,6 +1757,7 @@ export function WorkersPanel({
   onQuickReward: (workerId: string) => void;
   onDirectReward: (workerId: string) => void;
   onEnterWorker: (workerId: string) => void;
+  onOpenLedger?: (workerId: string) => void;
 }) {
   const [selectedWorkerId, setSelectedWorkerId] = useState<string | null>(null);
   const [query, setQuery] = useState("");
@@ -1707,33 +1800,39 @@ export function WorkersPanel({
         ) : (
           <div className="app-card divide-y divide-purple-50 overflow-hidden">
             {visibleWorkers.map((worker) => (
-              <button
-                type="button"
-                key={worker.id}
-                className={`flex w-full items-center gap-2.5 p-3 text-left transition hover:bg-purple-50 ${worker.isActive ? "" : "bg-slate-50/70"}`}
-                aria-label={`打开 ${worker.name} 的角色设置`}
-                onClick={() => setSelectedWorkerId(worker.id)}
-              >
-                <Avatar avatar={worker.avatar} theme={worker.theme} imageUrl={worker.avatarUrl} size={44} />
-                <div className="min-w-0 flex-1">
-                  <div className="flex min-w-0 flex-wrap items-center gap-1.5">
-                    <h3 className="truncate text-sm font-black text-slate-900">{worker.name}</h3>
-                    {!worker.isActive && <span className="rounded-md bg-slate-200 px-1.5 py-0.5 text-[10px] font-black text-slate-600">已停用</span>}
-                    {worker.pendingReviewCount > 0 && <span className="rounded-md bg-purple-100 px-1.5 py-0.5 text-[10px] font-black text-purple-700">待审 {worker.pendingReviewCount}</span>}
-                    {worker.activeTimer && <span className="rounded-md bg-orange-100 px-1.5 py-0.5 text-[10px] font-black text-orange-700">计时中</span>}
+              <div key={worker.id} className={`flex items-center gap-1 p-1.5 ${worker.isActive ? "" : "bg-slate-50/70"}`}>
+                <button
+                  type="button"
+                  className="flex min-w-0 flex-1 items-center gap-2.5 rounded-2xl p-1.5 text-left transition hover:bg-purple-50"
+                  aria-label={`打开 ${worker.name} 的角色设置`}
+                  onClick={() => setSelectedWorkerId(worker.id)}
+                >
+                  <Avatar avatar={worker.avatar} theme={worker.theme} imageUrl={worker.avatarUrl} size={44} />
+                  <div className="min-w-0 flex-1">
+                    <div className="flex min-w-0 flex-wrap items-center gap-1.5">
+                      <h3 className="truncate text-sm font-black text-slate-900">{worker.name}</h3>
+                      {!worker.isActive && <span className="rounded-md bg-slate-200 px-1.5 py-0.5 text-[10px] font-black text-slate-600">已停用</span>}
+                      {worker.pendingReviewCount > 0 && <span className="rounded-md bg-purple-100 px-1.5 py-0.5 text-[10px] font-black text-purple-700">待审 {worker.pendingReviewCount}</span>}
+                      {worker.activeTimer && <span className="rounded-md bg-orange-100 px-1.5 py-0.5 text-[10px] font-black text-orange-700">计时中</span>}
+                    </div>
+                    <p className="mt-0.5 truncate text-[11px] font-semibold text-slate-500">
+                      每日固定 {worker.dailyRewardSeconds > 0 ? formatDuration(worker.dailyRewardSeconds, false) : "关闭"} · 可用券 {worker.availableRewardCount} 张
+                      {worker.dailyCouponSetting.isEnabled ? ` · 每日派券 ${worker.dailyCouponSetting.dailyQuantity} 张` : ""}
+                    </p>
+                    {worker.activeTimer && <p className="mt-0.5 truncate text-[11px] font-black text-orange-700">{worker.activeTimer.title} · <LiveClock startedAt={worker.activeTimer.startedAt} /></p>}
                   </div>
-                  <p className="mt-0.5 truncate text-[11px] font-semibold text-slate-500">
-                    每日固定 {worker.dailyRewardSeconds > 0 ? formatDuration(worker.dailyRewardSeconds, false) : "关闭"} · 可用券 {worker.availableRewardCount} 张
-                    {worker.dailyCouponSetting.isEnabled ? ` · 每日派券 ${worker.dailyCouponSetting.dailyQuantity} 张` : ""}
-                  </p>
-                  {worker.activeTimer && <p className="mt-0.5 truncate text-[11px] font-black text-orange-700">{worker.activeTimer.title} · <LiveClock startedAt={worker.activeTimer.startedAt} /></p>}
-                </div>
-                <div className="shrink-0 text-right">
-                  <p className="text-xs font-black text-purple-700">{formatDuration(worker.balanceSeconds, false)}</p>
-                  <p className="mt-0.5 text-[10px] font-bold text-slate-400">余额 · 设置</p>
-                </div>
-                <ChevronRight className="shrink-0 text-slate-300" size={17} />
-              </button>
+                  <div className="shrink-0 text-right">
+                    <p className="text-xs font-black text-purple-700">{formatDuration(worker.balanceSeconds, false)}</p>
+                    <p className="mt-0.5 text-[10px] font-bold text-slate-400">余额 · 设置</p>
+                  </div>
+                  <ChevronRight className="shrink-0 text-slate-300" size={17} />
+                </button>
+                {onOpenLedger && (
+                  <button type="button" className="secondary-button shrink-0 !min-h-10 !rounded-xl !px-2 text-xs" aria-label={`查看 ${worker.name} 的明细`} onClick={() => onOpenLedger(worker.id)}>
+                    <Award className="mr-1 inline" size={16} />明细
+                  </button>
+                )}
+              </div>
             ))}
           </div>
         )}
@@ -1750,6 +1849,7 @@ export function WorkersPanel({
           onQuickReward={onQuickReward}
           onDirectReward={onDirectReward}
           onEnterWorker={onEnterWorker}
+          onOpenLedger={onOpenLedger}
           onClose={() => setSelectedWorkerId(null)}
         />
       )}
@@ -1843,6 +1943,7 @@ function WorkerManageDialog({
   onQuickReward,
   onDirectReward,
   onEnterWorker,
+  onOpenLedger,
   onClose,
 }: {
   worker: AdminWorker;
@@ -1852,6 +1953,7 @@ function WorkerManageDialog({
   onQuickReward: (workerId: string) => void;
   onDirectReward: (workerId: string) => void;
   onEnterWorker: (workerId: string) => void;
+  onOpenLedger?: (workerId: string) => void;
   onClose: () => void;
 }) {
   const [workerName, setWorkerName] = useState(worker.name);
@@ -1907,8 +2009,8 @@ function WorkerManageDialog({
             </div>
             <button type="button" className="grid h-9 w-9 shrink-0 place-items-center rounded-full bg-slate-100 text-slate-600" aria-label="关闭角色设置" disabled={busy} onClick={onClose}><XCircle size={19} /></button>
           </div>
-          {worker.isActive && (
-            <div className="mt-3 grid grid-cols-3 gap-2">
+          {worker.isActive ? (
+            <div className="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-4">
               <button
                 type="button"
                 className="primary-button !min-h-10 !rounded-xl !px-2 text-xs"
@@ -1919,7 +2021,10 @@ function WorkerManageDialog({
               </button>
               <button type="button" className="success-button !min-h-10 !rounded-xl !px-2 text-xs" disabled={busy} onClick={() => onQuickReward(worker.id)}><Plus className="mr-1 inline" size={16} />补录分钟</button>
               <button type="button" className="secondary-button !min-h-10 !rounded-xl !px-2 text-xs" disabled={busy} onClick={() => onEnterWorker(worker.id)}><DoorOpen className="mr-1 inline" size={16} />进入页面</button>
+              {onOpenLedger && <button type="button" className="secondary-button !min-h-10 !rounded-xl !px-2 text-xs" disabled={busy} onClick={() => { onClose(); onOpenLedger(worker.id); }}><Award className="mr-1 inline" size={16} />查看明细</button>}
             </div>
+          ) : (
+            onOpenLedger && <button type="button" className="secondary-button mt-3 w-full !min-h-10 text-sm" disabled={busy} onClick={() => { onClose(); onOpenLedger(worker.id); }}><Award className="mr-1 inline" size={17} />查看这个角色的明细</button>
           )}
           <div className="mt-3 rounded-xl bg-purple-50 px-3 py-2 text-xs font-semibold leading-5 text-purple-800">角色资料、每日奖励、派券、计时与高级操作都集中在这里；关闭弹窗即可返回角色列表。</div>
 

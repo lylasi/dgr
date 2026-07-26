@@ -46,6 +46,37 @@ export function dateKey(timestamp: number, timezone: string): string {
   return `${values.year}-${values.month}-${values.day}`;
 }
 
+export function dateStartTimestamp(localDate: string, timezone: string): number {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(localDate);
+  if (!match) throw new RangeError("Invalid local date");
+  const target = Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3]));
+  if (new Date(target).toISOString().slice(0, 10) !== localDate) throw new RangeError("Invalid local date");
+
+  const formatter = new Intl.DateTimeFormat("en-CA", {
+    timeZone: timezone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hourCycle: "h23",
+  });
+  let timestamp = target;
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    const parts = Object.fromEntries(formatter.formatToParts(new Date(timestamp)).map((part) => [part.type, part.value]));
+    const observed = Date.UTC(Number(parts.year), Number(parts.month) - 1, Number(parts.day), Number(parts.hour), Number(parts.minute), Number(parts.second));
+    const correction = target - observed;
+    timestamp += correction;
+    if (correction === 0) break;
+  }
+  return timestamp;
+}
+
+export function nextDateKey(localDate: string): string {
+  return new Date(dateStartTimestamp(localDate, "UTC") + 86_400_000).toISOString().slice(0, 10);
+}
+
 export function formatDateTime(timestamp: number, timezone = "Asia/Shanghai"): string {
   return new Intl.DateTimeFormat("zh-CN", {
     timeZone: timezone,

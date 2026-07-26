@@ -243,6 +243,18 @@ export type Transaction = {
   reversalOfTransactionId: string | null;
 };
 
+export type TransactionPage = {
+  items: Transaction[];
+  page: number;
+  pageSize: number;
+  total: number;
+  totalPages: number;
+  summary: {
+    incomeSeconds: number;
+    spentSeconds: number;
+  };
+};
+
 export type WorkerState = {
   worker: Worker;
   availableTasks: Task[];
