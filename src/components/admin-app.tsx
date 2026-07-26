@@ -952,7 +952,7 @@ function PublishPanel({
   );
 }
 
-function QuickTimerDialog({
+export function QuickTimerDialog({
   worker,
   activities,
   mutate,
@@ -969,10 +969,22 @@ function QuickTimerDialog({
   const activeActivities = activities.filter((activity) => activity.isActive);
   const [timerTarget, setTimerTarget] = useState(() => timerAssignments.length === 1 ? timerAssignments[0].id : "");
   const [pendingConsumptionId, setPendingConsumptionId] = useState<string | null>(null);
+  const [manualActivityId, setManualActivityId] = useState(() => activeActivities[0]?.id || "");
+  const [manualConsumptionMinutes, setManualConsumptionMinutes] = useState("");
   const selectedTimerTarget = timerAssignments.some((assignment) => assignment.id === timerTarget)
     ? timerTarget
     : timerAssignments.length === 1 ? timerAssignments[0].id : "";
   const pendingConsumption = activeActivities.find((activity) => activity.id === pendingConsumptionId);
+  const selectedManualActivityId = activeActivities.some((activity) => activity.id === manualActivityId)
+    ? manualActivityId
+    : activeActivities[0]?.id || "";
+  const manualConsumptionMinutesNumber = Number(manualConsumptionMinutes);
+  const manualConsumptionSeconds = manualConsumptionMinutesNumber * MINUTE;
+  const manualConsumptionValid = manualConsumptionMinutes !== ""
+    && Number.isInteger(manualConsumptionMinutesNumber)
+    && manualConsumptionMinutesNumber > 0
+    && manualConsumptionMinutesNumber <= 1_440
+    && manualConsumptionSeconds <= worker.balanceSeconds;
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -1021,6 +1033,21 @@ function QuickTimerDialog({
     if (ok) onClose();
   }
 
+  async function recordManualConsumption() {
+    const activity = activeActivities.find((item) => item.id === selectedManualActivityId);
+    if (!activity || !manualConsumptionValid) return;
+    const ok = await mutate(
+      {
+        action: "manual_consumption",
+        workerId: worker.id,
+        activityId: activity.id,
+        durationSeconds: manualConsumptionSeconds,
+      },
+      `已帮 ${worker.name} 记录${activity.name} ${formatDuration(manualConsumptionSeconds, false)}`,
+    );
+    if (ok) onClose();
+  }
+
   return (
     <div
       className="fixed inset-0 z-[70] flex items-end justify-center bg-slate-900/45 p-3 sm:items-center sm:p-6"
@@ -1040,8 +1067,8 @@ function QuickTimerDialog({
             <Clock3 size={24} strokeWidth={2.8} />
           </div>
           <div className="min-w-0 flex-1">
-            <h2 id="quick-timer-title" className="truncate text-xl font-black">帮 {worker.name} 计时</h2>
-            <p className="mt-1 text-sm font-semibold leading-6 text-slate-500">选择奖励任务，或开始一项时间币消耗。</p>
+            <h2 id="quick-timer-title" className="truncate text-xl font-black">{worker.name} · 计时与消耗</h2>
+            <p className="mt-1 text-sm font-semibold leading-6 text-slate-500">选择奖励任务、开始消耗计时，或直接补记已消耗时长。</p>
           </div>
           <button type="button" className="secondary-button !min-h-10 !w-10 !p-0" aria-label="关闭计时操作" disabled={busy} onClick={onClose}>×</button>
         </div>
@@ -1109,6 +1136,36 @@ function QuickTimerDialog({
                 <p className="mt-3 rounded-xl bg-white/70 px-3 py-2 text-sm font-bold text-slate-500">当前没有启用的消耗项目。</p>
               )}
               {worker.balanceSeconds <= 0 && activeActivities.length > 0 && <p className="mt-2 text-xs font-black text-orange-700">时间币余额不足，暂时不能开始消耗计时。</p>}
+              {activeActivities.length > 0 && (
+                <div className="mt-3 border-t border-orange-200 pt-3">
+                  <div className="flex flex-wrap items-baseline justify-between gap-1">
+                    <h4 className="text-sm font-black text-orange-900"><PenLine className="mr-1 inline" size={16} />直接填写已消耗时长</h4>
+                    <span className="text-[10px] font-black text-orange-700">无需开启计时</span>
+                  </div>
+                  <p className="mt-0.5 text-[11px] font-semibold leading-4 text-orange-700">适合补记已经发生、但没有提前打开计时器的消耗。</p>
+                  <div className="mt-2 grid grid-cols-2 gap-2">
+                    <select className="field !min-h-11" aria-label="直接填写消耗项目" value={selectedManualActivityId} disabled={busy} onChange={(event) => setManualActivityId(event.target.value)}>
+                      {activeActivities.map((activity) => <option key={activity.id} value={activity.id}>{activity.name}</option>)}
+                    </select>
+                    <input
+                      className="field !min-h-11"
+                      aria-label="已消耗分钟数"
+                      type="number"
+                      inputMode="numeric"
+                      min={1}
+                      max={1440}
+                      step={1}
+                      placeholder="分钟数"
+                      value={manualConsumptionMinutes}
+                      disabled={busy}
+                      onChange={(event) => setManualConsumptionMinutes(event.target.value)}
+                    />
+                    <button type="button" className="primary-button col-span-2 !min-h-11" disabled={busy || !manualConsumptionValid} onClick={() => void recordManualConsumption()}>确认记录并扣除</button>
+                  </div>
+                  {manualConsumptionValid && <p className="mt-2 text-[11px] font-black text-emerald-700">将立即扣除 {formatDuration(manualConsumptionSeconds, false)}，剩余 {formatDuration(worker.balanceSeconds - manualConsumptionSeconds, false)}。</p>}
+                  {manualConsumptionMinutes !== "" && manualConsumptionSeconds > worker.balanceSeconds && <p className="mt-2 text-[11px] font-black text-red-700">填写时长超过当前余额，最多可记录 {formatDuration(worker.balanceSeconds, false)}。</p>}
+                </div>
+              )}
             </section>
           </div>
         )}
@@ -1594,7 +1651,7 @@ function RewardRequestReviewCard({
   );
 }
 
-function WorkersPanel({
+export function WorkersPanel({
   state,
   mutate,
   busy,
@@ -1609,45 +1666,131 @@ function WorkersPanel({
   onDirectReward: (workerId: string) => void;
   onEnterWorker: (workerId: string) => void;
 }) {
+  const [selectedWorkerId, setSelectedWorkerId] = useState<string | null>(null);
+  const [query, setQuery] = useState("");
+  const [showCreate, setShowCreate] = useState(state.workers.length === 0);
+  const normalizedQuery = query.trim().toLocaleLowerCase();
+  const visibleWorkers = state.workers.filter((worker) => !normalizedQuery || worker.name.toLocaleLowerCase().includes(normalizedQuery));
+  const selectedWorker = selectedWorkerId ? state.workers.find((worker) => worker.id === selectedWorkerId) || null : null;
+  const activeCount = state.workers.filter((worker) => worker.isActive).length;
+  const inactiveCount = state.workers.length - activeCount;
+
+  return (
+    <div className="space-y-4">
+      <section>
+        <SectionTitle
+          title="角色管理"
+          text={`共 ${state.workers.length} 个角色 · 启用 ${activeCount}${inactiveCount > 0 ? ` · 停用 ${inactiveCount}` : ""} · 点击一行打开完整设置`}
+          action={(
+            <button type="button" className="primary-button shrink-0 !min-h-10 !px-3" disabled={busy} onClick={() => setShowCreate(true)}>
+              <UserPlus className="mr-1 inline" size={18} />新角色
+            </button>
+          )}
+        />
+        {state.workers.length > 5 && (
+          <input
+            className="field mb-2 !min-h-10 !py-2 text-sm"
+            aria-label="搜索角色"
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+            placeholder="搜索角色名称"
+          />
+        )}
+        {state.workers.length === 0 ? (
+          <EmptyState
+            title="还没有打工人"
+            text="创建角色、设置 PIN 和每日奖励后，就能开始发布任务。"
+            action={<button type="button" className="primary-button" onClick={() => setShowCreate(true)}>创建第一个角色</button>}
+          />
+        ) : visibleWorkers.length === 0 ? (
+          <div className="app-card p-5 text-center"><p className="text-sm font-black text-slate-600">没有匹配的角色</p><button type="button" className="mt-2 text-xs font-black text-purple-700" onClick={() => setQuery("")}>清除搜索</button></div>
+        ) : (
+          <div className="app-card divide-y divide-purple-50 overflow-hidden">
+            {visibleWorkers.map((worker) => (
+              <button
+                type="button"
+                key={worker.id}
+                className={`flex w-full items-center gap-2.5 p-3 text-left transition hover:bg-purple-50 ${worker.isActive ? "" : "bg-slate-50/70"}`}
+                aria-label={`打开 ${worker.name} 的角色设置`}
+                onClick={() => setSelectedWorkerId(worker.id)}
+              >
+                <Avatar avatar={worker.avatar} theme={worker.theme} imageUrl={worker.avatarUrl} size={44} />
+                <div className="min-w-0 flex-1">
+                  <div className="flex min-w-0 flex-wrap items-center gap-1.5">
+                    <h3 className="truncate text-sm font-black text-slate-900">{worker.name}</h3>
+                    {!worker.isActive && <span className="rounded-md bg-slate-200 px-1.5 py-0.5 text-[10px] font-black text-slate-600">已停用</span>}
+                    {worker.pendingReviewCount > 0 && <span className="rounded-md bg-purple-100 px-1.5 py-0.5 text-[10px] font-black text-purple-700">待审 {worker.pendingReviewCount}</span>}
+                    {worker.activeTimer && <span className="rounded-md bg-orange-100 px-1.5 py-0.5 text-[10px] font-black text-orange-700">计时中</span>}
+                  </div>
+                  <p className="mt-0.5 truncate text-[11px] font-semibold text-slate-500">
+                    每日固定 {worker.dailyRewardSeconds > 0 ? formatDuration(worker.dailyRewardSeconds, false) : "关闭"} · 可用券 {worker.availableRewardCount} 张
+                    {worker.dailyCouponSetting.isEnabled ? ` · 每日派券 ${worker.dailyCouponSetting.dailyQuantity} 张` : ""}
+                  </p>
+                  {worker.activeTimer && <p className="mt-0.5 truncate text-[11px] font-black text-orange-700">{worker.activeTimer.title} · <LiveClock startedAt={worker.activeTimer.startedAt} /></p>}
+                </div>
+                <div className="shrink-0 text-right">
+                  <p className="text-xs font-black text-purple-700">{formatDuration(worker.balanceSeconds, false)}</p>
+                  <p className="mt-0.5 text-[10px] font-bold text-slate-400">余额 · 设置</p>
+                </div>
+                <ChevronRight className="shrink-0 text-slate-300" size={17} />
+              </button>
+            ))}
+          </div>
+        )}
+      </section>
+
+      {showCreate && <CreateWorkerDialog mutate={mutate} busy={busy} onClose={() => setShowCreate(false)} />}
+      {selectedWorker && (
+        <WorkerManageDialog
+          key={selectedWorker.id}
+          worker={selectedWorker}
+          state={state}
+          mutate={mutate}
+          busy={busy}
+          onQuickReward={onQuickReward}
+          onDirectReward={onDirectReward}
+          onEnterWorker={onEnterWorker}
+          onClose={() => setSelectedWorkerId(null)}
+        />
+      )}
+    </div>
+  );
+}
+
+function CreateWorkerDialog({
+  mutate,
+  busy,
+  onClose,
+}: {
+  mutate: (body: Record<string, unknown>, success: string) => Promise<boolean>;
+  busy: boolean;
+  onClose: () => void;
+}) {
   const [name, setName] = useState("");
   const [pin, setPin] = useState("");
   const [avatar, setAvatar] = useState("star");
   const [theme, setTheme] = useState("purple");
   const [dailyMinutes, setDailyMinutes] = useState(120);
-  const [showCreate, setShowCreate] = useState(state.workers.length === 0);
 
   async function create(event: FormEvent) {
     event.preventDefault();
     const ok = await mutate({ action: "create_worker", name, password: pin, avatar, theme, dailyRewardSeconds: dailyMinutes * MINUTE }, "打工人创建成功");
-    if (ok) {
-      setName("");
-      setPin("");
-      setShowCreate(false);
-    }
+    if (ok) onClose();
   }
 
-  return (
-    <div className="space-y-6">
-      <section>
-        <SectionTitle title="角色管理" text="每日奖励修改后不会追溯当天已经发放的时数" />
-        {state.workers.length === 0 ? <EmptyState title="还没有打工人" text="点击下方按钮创建第一个角色。" /> : (
-          <div className="space-y-4">
-            {state.workers.map((worker) => <WorkerManageCard key={worker.id} worker={worker} state={state} mutate={mutate} busy={busy} onQuickReward={onQuickReward} onDirectReward={onDirectReward} onEnterWorker={onEnterWorker} />)}
-          </div>
-        )}
-      </section>
+  useEffect(() => {
+    const closeOnEscape = (event: KeyboardEvent) => { if (event.key === "Escape" && !busy) onClose(); };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [busy, onClose]);
 
-      <section className="border-t border-purple-100 pt-5">
-        <button
-          type="button"
-          className={showCreate ? "secondary-button w-full" : "primary-button w-full"}
-          onClick={() => setShowCreate((value) => !value)}
-        >
-          <UserPlus className="mr-2 inline" size={19} />{showCreate ? "收起创建表单" : "创建新角色"}
-        </button>
-        {showCreate && (
-          <form onSubmit={create} className="app-card page-enter mt-3 p-4 sm:p-6">
-            <SectionTitle title="创建打工人" text="每个角色都有自己的 PIN 和时间小金库" />
+  return (
+    <div className="fixed inset-0 z-[70] flex items-end justify-center bg-slate-900/45 p-2 sm:items-center sm:p-5" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !busy) onClose(); }}>
+      <form onSubmit={create} className="page-enter max-h-[92vh] w-full max-w-lg overflow-y-auto rounded-[24px] bg-white p-4 shadow-2xl sm:p-6" role="dialog" aria-modal="true" aria-labelledby="create-worker-title">
+            <div className="mb-4 flex items-start justify-between gap-3">
+              <div><h2 id="create-worker-title" className="text-xl font-black">创建打工人</h2><p className="mt-0.5 text-sm font-semibold text-slate-500">每个角色都有自己的 PIN 和时间小金库</p></div>
+              <button type="button" className="grid h-9 w-9 shrink-0 place-items-center rounded-full bg-slate-100 text-slate-600" aria-label="关闭创建角色" disabled={busy} onClick={onClose}><XCircle size={19} /></button>
+            </div>
             <div className="grid gap-3 sm:grid-cols-2">
               <label>
                 <span className="label">角色名称</span>
@@ -1667,7 +1810,7 @@ function WorkersPanel({
                   </button>
                 ))}
               </div>
-              <p className="mt-2 text-xs font-semibold text-slate-500">创建后可在角色卡片中上传照片头像。</p>
+              <p className="mt-2 text-xs font-semibold text-slate-500">创建后可在角色设置弹窗中上传照片头像。</p>
             </div>
             <div className="mt-4">
               <span className="label">主题颜色</span>
@@ -1683,15 +1826,16 @@ function WorkersPanel({
                 <option value={0}>关闭</option><option value={30}>30 分钟</option><option value={60}>1 小时</option><option value={120}>2 小时（默认）</option><option value={180}>3 小时</option>
               </select>
             </label>
-            <button className="primary-button mt-5 w-full" disabled={busy || !name || pin.length < 4}><UserPlus className="mr-2 inline" size={19} />创建角色</button>
-          </form>
-        )}
-      </section>
+            <div className="mt-5 grid grid-cols-2 gap-2">
+              <button type="button" className="secondary-button" disabled={busy} onClick={onClose}>取消</button>
+              <button className="primary-button" disabled={busy || !name.trim() || pin.length < 4}><UserPlus className="mr-2 inline" size={19} />创建角色</button>
+            </div>
+      </form>
     </div>
   );
 }
 
-function WorkerManageCard({
+function WorkerManageDialog({
   worker,
   state,
   mutate,
@@ -1699,6 +1843,7 @@ function WorkerManageCard({
   onQuickReward,
   onDirectReward,
   onEnterWorker,
+  onClose,
 }: {
   worker: AdminWorker;
   state: AdminState;
@@ -1707,7 +1852,9 @@ function WorkerManageCard({
   onQuickReward: (workerId: string) => void;
   onDirectReward: (workerId: string) => void;
   onEnterWorker: (workerId: string) => void;
+  onClose: () => void;
 }) {
+  const [workerName, setWorkerName] = useState(worker.name);
   const [pin, setPin] = useState("");
   const [adjustMinutes, setAdjustMinutes] = useState("");
   const [reason, setReason] = useState("");
@@ -1726,6 +1873,14 @@ function WorkerManageCard({
   const manualConsumptionMinutesNumber = Number(manualConsumptionMinutes);
   const dailyPresets = [0, 30 * MINUTE, HOUR, 2 * HOUR, 3 * HOUR];
 
+  useEffect(() => {
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && !busy && !pendingConsumptionId) onClose();
+    };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [busy, onClose, pendingConsumptionId]);
+
   async function uploadAvatar(event: ChangeEvent<HTMLInputElement>) {
     const input = event.currentTarget;
     const file = input.files?.[0];
@@ -1741,34 +1896,56 @@ function WorkerManageCard({
   }
 
   return (
-    <div className={`app-card p-4 ${worker.isActive ? "" : "opacity-60"}`}>
-      <div className="flex items-center gap-3">
-        <Avatar avatar={worker.avatar} theme={worker.theme} imageUrl={worker.avatarUrl} />
-        <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-2"><h3 className="truncate text-lg font-black">{worker.name}</h3>{!worker.isActive && <span className="pill bg-slate-100 text-slate-500">已停用</span>}</div>
-          <div className="mt-1 text-sm"><TimeCoin seconds={worker.balanceSeconds} compact /></div>
-        </div>
-        {worker.isActive && (
-          <div className="flex shrink-0 flex-col gap-1.5">
-            <button
-              type="button"
-              className="primary-button !min-h-10 !px-3 text-sm"
-              disabled={busy || !state.rewardSystemEnabled || state.rewardDefinitions.filter((item) => item.isActive).length === 0}
-              onClick={() => onDirectReward(worker.id)}
-            >
-              <Gift className="mr-1 inline" size={17} />发奖励券
-            </button>
-            <button
-              type="button"
-              className="secondary-button !min-h-10 !px-3 text-sm"
-              disabled={busy}
-              onClick={() => onQuickReward(worker.id)}
-            >
-              补录分钟
-            </button>
+    <>
+      <div className="fixed inset-0 z-[60] flex items-end justify-center bg-slate-900/45 p-2 sm:items-center sm:p-5" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !busy) onClose(); }}>
+        <section className="page-enter max-h-[92vh] w-full max-w-xl overflow-y-auto rounded-[24px] bg-white p-4 shadow-2xl sm:p-5" role="dialog" aria-modal="true" aria-labelledby="worker-settings-title">
+          <div className="flex items-center gap-3">
+            <Avatar avatar={worker.avatar} theme={worker.theme} imageUrl={worker.avatarUrl} />
+            <div className="min-w-0 flex-1">
+              <div className="flex items-center gap-2"><h2 id="worker-settings-title" className="truncate text-xl font-black">{worker.name}</h2>{!worker.isActive && <span className="pill bg-slate-100 text-slate-500">已停用</span>}</div>
+              <div className="mt-1 text-sm"><TimeCoin seconds={worker.balanceSeconds} compact /></div>
+            </div>
+            <button type="button" className="grid h-9 w-9 shrink-0 place-items-center rounded-full bg-slate-100 text-slate-600" aria-label="关闭角色设置" disabled={busy} onClick={onClose}><XCircle size={19} /></button>
           </div>
-        )}
-      </div>
+          {worker.isActive && (
+            <div className="mt-3 grid grid-cols-3 gap-2">
+              <button
+                type="button"
+                className="primary-button !min-h-10 !rounded-xl !px-2 text-xs"
+                disabled={busy || !state.rewardSystemEnabled || state.rewardDefinitions.filter((item) => item.isActive).length === 0}
+                onClick={() => onDirectReward(worker.id)}
+              >
+                <Gift className="mr-1 inline" size={16} />发奖励券
+              </button>
+              <button type="button" className="success-button !min-h-10 !rounded-xl !px-2 text-xs" disabled={busy} onClick={() => onQuickReward(worker.id)}><Plus className="mr-1 inline" size={16} />补录分钟</button>
+              <button type="button" className="secondary-button !min-h-10 !rounded-xl !px-2 text-xs" disabled={busy} onClick={() => onEnterWorker(worker.id)}><DoorOpen className="mr-1 inline" size={16} />进入页面</button>
+            </div>
+          )}
+          <div className="mt-3 rounded-xl bg-purple-50 px-3 py-2 text-xs font-semibold leading-5 text-purple-800">角色资料、每日奖励、派券、计时与高级操作都集中在这里；关闭弹窗即可返回角色列表。</div>
+
+          <div className="mt-3 rounded-2xl bg-slate-50 p-3">
+            <label htmlFor={`worker-name-${worker.id}`} className="label">角色名称</label>
+            <div className="flex gap-2">
+              <input
+                id={`worker-name-${worker.id}`}
+                className="field"
+                aria-label="角色名称"
+                value={workerName}
+                maxLength={30}
+                disabled={busy}
+                onChange={(event) => setWorkerName(event.target.value)}
+              />
+              <button
+                type="button"
+                className="primary-button shrink-0 !px-3"
+                disabled={busy || !workerName.trim() || workerName.trim() === worker.name}
+                onClick={() => void mutate({ action: "update_worker", workerId: worker.id, name: workerName.trim() }, "角色名称已更新")}
+              >
+                保存名称
+              </button>
+            </div>
+            <p className="mt-1.5 text-[11px] font-semibold leading-4 text-slate-500">只修改显示名称，余额、任务、奖励券、历史记录和当前登录都不会受影响。</p>
+          </div>
 
       <div className="mt-3 grid grid-cols-2 gap-2">
         <label className={`secondary-button cursor-pointer text-center ${worker.avatarUrl ? "" : "col-span-2"} ${busy ? "pointer-events-none opacity-60" : ""}`}>
@@ -1796,11 +1973,6 @@ function WorkerManageCard({
           </button>
         ) : null}
       </div>
-      {worker.isActive && (
-        <button className="secondary-button mt-3 w-full" disabled={busy} onClick={() => onEnterWorker(worker.id)}>
-          <DoorOpen className="mr-1 inline" size={17} />进入 {worker.name} 的小朋友页面
-        </button>
-      )}
       <p className="mt-1.5 text-xs font-semibold text-slate-500">照片会在本机裁成正方形并压缩后保存到 SQLite。</p>
 
       {!worker.isActive && (
@@ -1907,6 +2079,8 @@ function WorkerManageCard({
           </details>
         </div>
       )}
+        </section>
+      </div>
       {pendingConsumption && (
         <ConsumptionStartDialog
           activityName={pendingConsumption.name}
@@ -1923,7 +2097,7 @@ function WorkerManageCard({
           }}
         />
       )}
-    </div>
+    </>
   );
 }
 
