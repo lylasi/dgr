@@ -5,7 +5,8 @@ services:
     ports:
       - "${PORT:-3000}:${PORT:-3000}"
     environment:
-      ADMIN_PASSWORD: ${ADMIN_PASSWORD:?请设置 ADMIN_PASSWORD}
+      SYSTEM_ADMIN_PASSWORD: ${SYSTEM_ADMIN_PASSWORD:-}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
       SESSION_SECRET: ${SESSION_SECRET:?请设置至少32位的 SESSION_SECRET}
       APP_TIMEZONE: ${APP_TIMEZONE:-Asia/Shanghai}
       DATABASE_PATH: /app/data/pen-worker.db

@@ -12,12 +12,18 @@ import {
   type WorkerRewardItemRow,
   type WorkerRow,
 } from "@/lib/db";
+import {
+  actorCanOperateWorker,
+  actorAuditFields,
+  isFamilyManager,
+  type FamilyBusinessContext,
+} from "@/lib/business-context";
 import { AppError } from "@/lib/http";
 import { verifyPassword } from "@/lib/password";
 import { dateKey, MINUTE } from "@/lib/time";
 
 type Db = Database.Database;
-type Actor = "admin" | `worker:${string}` | "system";
+type StoredActor = string;
 
 type RewardDefinitionInput = {
   name: string;
@@ -64,23 +70,36 @@ function normalizedRequestId(value?: string) {
   return value?.trim() || uniqueId();
 }
 
-function getWorker(db: Db, workerId: string, includeInactive = false): WorkerRow {
-  const worker = db.prepare("SELECT * FROM workers WHERE id = ?").get(workerId) as WorkerRow | undefined;
+function requireFamilyManager(context: FamilyBusinessContext) {
+  if (!isFamilyManager(context)) {
+    throw new AppError("只有当前家庭的老板可以执行这项操作。", 403, "FAMILY_MANAGER_REQUIRED");
+  }
+}
+
+function getWorker(db: Db, familyId: string, workerId: string, includeInactive = false): WorkerRow {
+  const worker = db
+    .prepare("SELECT * FROM workers WHERE id = ? AND family_id = ?")
+    .get(workerId, familyId) as WorkerRow | undefined;
   if (!worker || (!includeInactive && !worker.is_active)) {
     throw new AppError("没有找到这个打工人。", 404, "WORKER_NOT_FOUND");
   }
   return worker;
 }
 
-function getDefinition(db: Db, definitionId: string): RewardDefinitionRow {
+function getDefinition(db: Db, familyId: string, definitionId: string): RewardDefinitionRow {
   const definition = db
-    .prepare("SELECT * FROM reward_definitions WHERE id = ?")
-    .get(definitionId) as RewardDefinitionRow | undefined;
+    .prepare("SELECT * FROM reward_definitions WHERE id = ? AND family_id = ?")
+    .get(definitionId, familyId) as RewardDefinitionRow | undefined;
   if (!definition) throw new AppError("没有找到这个奖励券模板。", 404, "REWARD_DEFINITION_NOT_FOUND");
   return definition;
 }
 
-function getDefinitionUsage(db: Db, definitionId: string): RewardDefinitionUsage & { imageSnapshotCount: number } {
+function getDefinitionUsage(
+  db: Db,
+  familyId: string,
+  definitionId: string,
+): RewardDefinitionUsage & { imageSnapshotCount: number } {
+  getDefinition(db, familyId, definitionId);
   const row = db.prepare(`
     SELECT
       (SELECT COUNT(*) FROM task_reward_bindings WHERE definition_id = ?) AS task_binding_count,
@@ -109,44 +128,61 @@ function getDefinitionUsage(db: Db, definitionId: string): RewardDefinitionUsage
   };
 }
 
-function getRewardItem(db: Db, rewardItemId: string): WorkerRewardItemRow {
+function getRewardItem(db: Db, familyId: string, rewardItemId: string): WorkerRewardItemRow {
   const item = db
-    .prepare("SELECT * FROM worker_reward_items WHERE id = ?")
-    .get(rewardItemId) as WorkerRewardItemRow | undefined;
+    .prepare("SELECT * FROM worker_reward_items WHERE id = ? AND family_id = ?")
+    .get(rewardItemId, familyId) as WorkerRewardItemRow | undefined;
   if (!item) throw new AppError("没有找到这张奖励券。", 404, "REWARD_ITEM_NOT_FOUND");
   return item;
 }
 
 function audit(
   db: Db,
-  actor: Actor,
+  context: FamilyBusinessContext,
   action: string,
   targetType: string,
   targetId: string | null,
   detail: string,
   requestId: string,
 ) {
+  const actor = actorAuditFields(context.actor);
   db.prepare(`
-    INSERT INTO audit_logs(id, actor, action, target_type, target_id, detail, request_id, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(uniqueId(), actor, action, targetType, targetId, detail, requestId, Date.now());
+    INSERT INTO audit_logs(
+      id, family_id, actor, actor_type, actor_id, actor_name_snapshot,
+      acting_for_worker_id, action, target_type, target_id, detail, request_id, created_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    uniqueId(),
+    context.familyId,
+    actor.key,
+    actor.type,
+    actor.id,
+    actor.name,
+    actor.actingForWorkerId,
+    action,
+    targetType,
+    targetId,
+    detail,
+    requestId,
+    Date.now(),
+  );
 }
 
-function previousAuditTarget(db: Db, requestId: string) {
+function previousAuditTarget(db: Db, familyId: string, requestId: string) {
   return db
-    .prepare("SELECT target_id, action FROM audit_logs WHERE request_id = ?")
-    .get(requestId) as { target_id: string | null; action: string } | undefined;
+    .prepare("SELECT target_id, action FROM audit_logs WHERE family_id = ? AND request_id = ?")
+    .get(familyId, requestId) as { target_id: string | null; action: string } | undefined;
 }
 
-function rewardSystemEnabledWithin(db: Db): boolean {
+function rewardSystemEnabledWithin(db: Db, familyId: string): boolean {
   const setting = db
-    .prepare("SELECT value FROM app_settings WHERE key = 'reward_system_enabled'")
-    .get() as { value: string } | undefined;
+    .prepare("SELECT value FROM app_settings WHERE family_id = ? AND key = 'reward_system_enabled'")
+    .get(familyId) as { value: string } | undefined;
   return setting?.value !== "0";
 }
 
-function assertRewardSystemEnabled(db: Db) {
-  if (!rewardSystemEnabledWithin(db)) {
+function assertRewardSystemEnabled(db: Db, familyId: string) {
+  if (!rewardSystemEnabledWithin(db, familyId)) {
     throw new AppError("奖励系统现在暂停使用，请稍后再试。", 409, "REWARD_SYSTEM_DISABLED");
   }
 }
@@ -299,18 +335,21 @@ function assertTaskRewardBinding(input: TaskRewardBindingInput) {
 
 export function replaceTaskRewardBindingsWithin(
   db: Db,
+  familyId: string,
   taskId: string,
   inputs: TaskRewardBindingInput[],
   bonusEnabled: boolean,
   now = Date.now(),
 ) {
+  const task = db.prepare("SELECT id FROM tasks WHERE id = ? AND family_id = ?").get(taskId, familyId);
+  if (!task) throw new AppError("没有找到这个任务。", 404, "TASK_NOT_FOUND");
   const merged = new Map<string, TaskRewardBindingInput & { probabilityPercent: number }>();
   for (const input of inputs) {
     const probabilityPercent = assertTaskRewardBinding(input);
     if (input.grantTier === "excellent_bonus" && !bonusEnabled) {
       throw new AppError("未开启优秀完成时不能配置优秀额外奖励券。", 400, "EXCELLENT_REWARD_NOT_ALLOWED");
     }
-    const definition = getDefinition(db, input.definitionId);
+    const definition = getDefinition(db, familyId, input.definitionId);
     if (!definition.is_active) {
       throw new AppError(`奖励券模板“${definition.name}”已经停用。`, 409, "REWARD_DEFINITION_DISABLED");
     }
@@ -352,7 +391,9 @@ export function replaceTaskRewardBindingsWithin(
   }
 }
 
-export function getPublicTaskRewardBindings(db: Db, taskId: string) {
+export function getPublicTaskRewardBindings(db: Db, familyId: string, taskId: string) {
+  const task = db.prepare("SELECT id FROM tasks WHERE id = ? AND family_id = ?").get(taskId, familyId);
+  if (!task) throw new AppError("没有找到这个任务。", 404, "TASK_NOT_FOUND");
   const bindings = db.prepare(`
     SELECT * FROM task_reward_bindings
     WHERE task_id = ?
@@ -364,16 +405,21 @@ export function getPublicTaskRewardBindings(db: Db, taskId: string) {
     grantTier: binding.grant_tier,
     quantity: binding.quantity,
     probabilityPercent: binding.probability_percent,
-    ...publicDefinition(getDefinition(db, binding.definition_id)),
+    ...publicDefinition(getDefinition(db, familyId, binding.definition_id)),
   }));
 }
 
 export function snapshotAssignmentRewardsWithin(
   db: Db,
+  familyId: string,
   assignmentId: string,
   taskId: string,
   now = Date.now(),
 ) {
+  const assignment = db
+    .prepare("SELECT id FROM task_assignments WHERE id = ? AND family_id = ? AND task_id = ?")
+    .get(assignmentId, familyId, taskId);
+  if (!assignment) throw new AppError("没有找到这个任务记录。", 404, "ASSIGNMENT_NOT_FOUND");
   db.prepare("DELETE FROM assignment_reward_items WHERE assignment_id = ?").run(assignmentId);
   const bindings = db.prepare(`
     SELECT * FROM task_reward_bindings
@@ -381,7 +427,7 @@ export function snapshotAssignmentRewardsWithin(
     ORDER BY grant_tier, sort_order, created_at
   `).all(taskId) as TaskRewardBindingRow[];
   for (const binding of bindings) {
-    const definition = getDefinition(db, binding.definition_id);
+    const definition = getDefinition(db, familyId, binding.definition_id);
     db.prepare(`
       INSERT INTO assignment_reward_items(
         id, assignment_id, task_reward_binding_id, definition_id, definition_version,
@@ -421,7 +467,11 @@ type AssignmentRewardItemWithOutcome = AssignmentRewardItemRow & {
   awarded_quantity: number;
 };
 
-export function getPublicAssignmentRewardItems(db: Db, assignmentId: string) {
+export function getPublicAssignmentRewardItems(db: Db, familyId: string, assignmentId: string) {
+  const assignment = db
+    .prepare("SELECT id FROM task_assignments WHERE id = ? AND family_id = ?")
+    .get(assignmentId, familyId);
+  if (!assignment) throw new AppError("没有找到这个任务记录。", 404, "ASSIGNMENT_NOT_FOUND");
   const rows = db.prepare(`
     SELECT i.*,
       COUNT(o.id) AS outcome_count,
@@ -455,24 +505,31 @@ export function getPublicAssignmentRewardItems(db: Db, assignmentId: string) {
   }));
 }
 
-export function isRewardSystemEnabled() {
-  return rewardSystemEnabledWithin(getDb());
+export function isRewardSystemEnabled(context: FamilyBusinessContext) {
+  return rewardSystemEnabledWithin(getDb(), context.familyId);
 }
 
-export function setRewardSystemEnabled(enabled: boolean, requestId?: string) {
+export function setRewardSystemEnabled(
+  context: FamilyBusinessContext,
+  enabled: boolean,
+  requestId?: string,
+) {
+  requireFamilyManager(context);
   const db = getDb();
   const mutationId = normalizedRequestId(requestId);
   return db.transaction(() => {
-    const previous = previousAuditTarget(db, mutationId);
-    if (previous) return { duplicated: true, enabled: rewardSystemEnabledWithin(db) };
+    const previous = previousAuditTarget(db, context.familyId, mutationId);
+    if (previous) return { duplicated: true, enabled: rewardSystemEnabledWithin(db, context.familyId) };
     const now = Date.now();
     db.prepare(`
-      INSERT INTO app_settings(key, value, updated_at) VALUES ('reward_system_enabled', ?, ?)
-      ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
-    `).run(enabled ? "1" : "0", now);
+      INSERT INTO app_settings(family_id, key, value, updated_at)
+      VALUES (?, 'reward_system_enabled', ?, ?)
+      ON CONFLICT(family_id, key)
+      DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+    `).run(context.familyId, enabled ? "1" : "0", now);
     audit(
       db,
-      "admin",
+      context,
       enabled ? "reward_system_enabled" : "reward_system_disabled",
       "app_setting",
       "reward_system_enabled",
@@ -483,25 +540,30 @@ export function setRewardSystemEnabled(enabled: boolean, requestId?: string) {
   }).immediate();
 }
 
-export function createRewardDefinition(input: RewardDefinitionInput & { requestId?: string }) {
+export function createRewardDefinition(
+  context: FamilyBusinessContext,
+  input: RewardDefinitionInput & { requestId?: string },
+) {
+  requireFamilyManager(context);
   const db = getDb();
   const values = normalizeDefinition(input);
   const mutationId = normalizedRequestId(input.requestId);
   return db.transaction(() => {
-    const previous = previousAuditTarget(db, mutationId);
+    const previous = previousAuditTarget(db, context.familyId, mutationId);
     if (previous?.target_id) return previous.target_id;
     const id = uniqueId();
     const now = Date.now();
     db.prepare(`
       INSERT INTO reward_definitions(
-        id, name, description, icon, theme, kind, version, is_active,
+        id, family_id, name, description, icon, theme, kind, version, is_active,
         random_min_seconds, random_max_seconds, fixed_seconds,
         physical_description, fulfillment_instructions, physical_category,
         current_image_id, validity_mode, validity_days, validity_fixed_at,
         created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, 1, 1, ?, ?, ?, ?, ?, ?, NULL, 'permanent', NULL, NULL, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, 1, 1, ?, ?, ?, ?, ?, ?, NULL, 'permanent', NULL, NULL, ?, ?)
     `).run(
       id,
+      context.familyId,
       values.name,
       values.description,
       values.icon,
@@ -516,19 +578,23 @@ export function createRewardDefinition(input: RewardDefinitionInput & { requestI
       now,
       now,
     );
-    audit(db, "admin", "reward_definition_created", "reward_definition", id, `创建模板：${values.name}`, mutationId);
+    audit(db, context, "reward_definition_created", "reward_definition", id, `创建模板：${values.name}`, mutationId);
     return id;
   }).immediate();
 }
 
-export function updateRewardDefinition(input: RewardDefinitionInput & { definitionId: string; requestId?: string }) {
+export function updateRewardDefinition(
+  context: FamilyBusinessContext,
+  input: RewardDefinitionInput & { definitionId: string; requestId?: string },
+) {
+  requireFamilyManager(context);
   const db = getDb();
   const values = normalizeDefinition(input);
   const mutationId = normalizedRequestId(input.requestId);
   return db.transaction(() => {
-    const previous = previousAuditTarget(db, mutationId);
+    const previous = previousAuditTarget(db, context.familyId, mutationId);
     if (previous) return { duplicated: true };
-    const current = getDefinition(db, input.definitionId);
+    const current = getDefinition(db, context.familyId, input.definitionId);
     const now = Date.now();
     db.prepare(`
       UPDATE reward_definitions SET
@@ -553,31 +619,37 @@ export function updateRewardDefinition(input: RewardDefinitionInput & { definiti
       now,
       current.id,
     );
-    audit(db, "admin", "reward_definition_updated", "reward_definition", current.id, `更新模板：${values.name}`, mutationId);
+    audit(db, context, "reward_definition_updated", "reward_definition", current.id, `更新模板：${values.name}`, mutationId);
     return { duplicated: false };
   }).immediate();
 }
 
-export function copyRewardDefinition(definitionId: string, requestId?: string) {
+export function copyRewardDefinition(
+  context: FamilyBusinessContext,
+  definitionId: string,
+  requestId?: string,
+) {
+  requireFamilyManager(context);
   const db = getDb();
   const mutationId = normalizedRequestId(requestId);
   return db.transaction(() => {
-    const previous = previousAuditTarget(db, mutationId);
+    const previous = previousAuditTarget(db, context.familyId, mutationId);
     if (previous?.target_id) return previous.target_id;
-    const source = getDefinition(db, definitionId);
+    const source = getDefinition(db, context.familyId, definitionId);
     const id = uniqueId();
     const now = Date.now();
     const copiedName = `${source.name}（副本）`.slice(0, 60);
     db.prepare(`
       INSERT INTO reward_definitions(
-        id, name, description, icon, theme, kind, version, is_active,
+        id, family_id, name, description, icon, theme, kind, version, is_active,
         random_min_seconds, random_max_seconds, fixed_seconds,
         physical_description, fulfillment_instructions, physical_category,
         current_image_id, validity_mode, validity_days, validity_fixed_at,
         created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, 1, 1, ?, ?, ?, ?, ?, ?, NULL, 'permanent', NULL, NULL, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, 1, 1, ?, ?, ?, ?, ?, ?, NULL, 'permanent', NULL, NULL, ?, ?)
     `).run(
       id,
+      context.familyId,
       copiedName,
       source.description,
       source.icon,
@@ -606,23 +678,29 @@ export function copyRewardDefinition(definitionId: string, requestId?: string) {
         db.prepare("UPDATE reward_definitions SET current_image_id = ? WHERE id = ?").run(copiedImageId, id);
       }
     }
-    audit(db, "admin", "reward_definition_copied", "reward_definition", id, `复制模板：${source.name}`, mutationId);
+    audit(db, context, "reward_definition_copied", "reward_definition", id, `复制模板：${source.name}`, mutationId);
     return id;
   }).immediate();
 }
 
-export function setRewardDefinitionActive(definitionId: string, active: boolean, requestId?: string) {
+export function setRewardDefinitionActive(
+  context: FamilyBusinessContext,
+  definitionId: string,
+  active: boolean,
+  requestId?: string,
+) {
+  requireFamilyManager(context);
   const db = getDb();
   const mutationId = normalizedRequestId(requestId);
   return db.transaction(() => {
-    const previous = previousAuditTarget(db, mutationId);
+    const previous = previousAuditTarget(db, context.familyId, mutationId);
     if (previous) return { duplicated: true };
-    const definition = getDefinition(db, definitionId);
+    const definition = getDefinition(db, context.familyId, definitionId);
     db.prepare("UPDATE reward_definitions SET is_active = ?, updated_at = ? WHERE id = ?")
       .run(active ? 1 : 0, Date.now(), definition.id);
     audit(
       db,
-      "admin",
+      context,
       active ? "reward_definition_enabled" : "reward_definition_disabled",
       "reward_definition",
       definition.id,
@@ -633,11 +711,16 @@ export function setRewardDefinitionActive(definitionId: string, active: boolean,
   }).immediate();
 }
 
-export function deleteRewardDefinition(definitionId: string, requestId?: string) {
+export function deleteRewardDefinition(
+  context: FamilyBusinessContext,
+  definitionId: string,
+  requestId?: string,
+) {
+  requireFamilyManager(context);
   const db = getDb();
   const mutationId = normalizedRequestId(requestId);
   return db.transaction(() => {
-    const previous = previousAuditTarget(db, mutationId);
+    const previous = previousAuditTarget(db, context.familyId, mutationId);
     if (previous) {
       if (previous.action === "reward_definition_deleted" && previous.target_id === definitionId) {
         return { duplicated: true };
@@ -645,8 +728,8 @@ export function deleteRewardDefinition(definitionId: string, requestId?: string)
       throw new AppError("请求编号已用于另一项操作。", 409, "REQUEST_ID_CONFLICT");
     }
 
-    const definition = getDefinition(db, definitionId);
-    const usage = getDefinitionUsage(db, definition.id);
+    const definition = getDefinition(db, context.familyId, definitionId);
+    const usage = getDefinitionUsage(db, context.familyId, definition.id);
     if (
       usage.taskBindingCount > 0
       || usage.assignmentSnapshotCount > 0
@@ -665,7 +748,7 @@ export function deleteRewardDefinition(definitionId: string, requestId?: string)
     db.prepare("DELETE FROM reward_definitions WHERE id = ?").run(definition.id);
     audit(
       db,
-      "admin",
+      context,
       "reward_definition_deleted",
       "reward_definition",
       definition.id,
@@ -689,11 +772,12 @@ function rewardImageMime(data: Buffer): RewardDefinitionImageRow["mime_type"] | 
   return null;
 }
 
-export function setRewardDefinitionImage(input: {
+export function setRewardDefinitionImage(context: FamilyBusinessContext, input: {
   definitionId: string;
   imageDataUrl: string;
   requestId?: string;
 }) {
+  requireFamilyManager(context);
   const match = /^data:image\/(?:webp|png|jpeg);base64,([A-Za-z0-9+/]+={0,2})$/.exec(input.imageDataUrl);
   if (!match) throw new AppError("图片格式不正确，请选择 JPG、PNG 或 WebP 图片。", 400, "INVALID_REWARD_IMAGE");
   const imageData = Buffer.from(match[1], "base64");
@@ -706,9 +790,9 @@ export function setRewardDefinitionImage(input: {
   const db = getDb();
   const mutationId = normalizedRequestId(input.requestId);
   return db.transaction(() => {
-    const previous = previousAuditTarget(db, mutationId);
+    const previous = previousAuditTarget(db, context.familyId, mutationId);
     if (previous?.target_id) return imageUrl(previous.target_id);
-    const definition = getDefinition(db, input.definitionId);
+    const definition = getDefinition(db, context.familyId, input.definitionId);
     if (definition.kind !== "physical") {
       throw new AppError("只有实物券可以上传自定义图片。", 409, "IMAGE_NOT_ALLOWED");
     }
@@ -725,7 +809,7 @@ export function setRewardDefinitionImage(input: {
     `).run(imageId, now, definition.id);
     audit(
       db,
-      "admin",
+      context,
       "reward_definition_image_updated",
       "reward_definition_image",
       imageId,
@@ -736,13 +820,18 @@ export function setRewardDefinitionImage(input: {
   }).immediate();
 }
 
-export function removeRewardDefinitionImage(definitionId: string, requestId?: string) {
+export function removeRewardDefinitionImage(
+  context: FamilyBusinessContext,
+  definitionId: string,
+  requestId?: string,
+) {
+  requireFamilyManager(context);
   const db = getDb();
   const mutationId = normalizedRequestId(requestId);
   return db.transaction(() => {
-    const previous = previousAuditTarget(db, mutationId);
+    const previous = previousAuditTarget(db, context.familyId, mutationId);
     if (previous) return { duplicated: true };
-    const definition = getDefinition(db, definitionId);
+    const definition = getDefinition(db, context.familyId, definitionId);
     if (definition.kind !== "physical") {
       throw new AppError("只有实物券可以设置自定义图片。", 409, "IMAGE_NOT_ALLOWED");
     }
@@ -755,7 +844,7 @@ export function removeRewardDefinitionImage(definitionId: string, requestId?: st
     }
     audit(
       db,
-      "admin",
+      context,
       "reward_definition_image_removed",
       "reward_definition",
       definition.id,
@@ -766,10 +855,18 @@ export function removeRewardDefinitionImage(definitionId: string, requestId?: st
   }).immediate();
 }
 
-export function getRewardDefinitionImage(imageId: string): RewardDefinitionImageRow | null {
+export function getRewardDefinitionImage(
+  context: FamilyBusinessContext,
+  imageId: string,
+): RewardDefinitionImageRow | null {
   return (getDb()
-    .prepare("SELECT * FROM reward_definition_images WHERE id = ?")
-    .get(imageId) as RewardDefinitionImageRow | undefined) || null;
+    .prepare(`
+      SELECT image.*
+      FROM reward_definition_images image
+      JOIN reward_definitions definition ON definition.id = image.definition_id
+      WHERE image.id = ? AND definition.family_id = ?
+    `)
+    .get(imageId, context.familyId) as RewardDefinitionImageRow | undefined) || null;
 }
 
 function ensureDailySettingWithin(db: Db, workerId: string, now = Date.now()): DailyCouponSettingRow {
@@ -808,7 +905,7 @@ function publicDailyGrant(row: DailyCouponGrantRow) {
   };
 }
 
-export function updateDailyCouponSetting(input: {
+export function updateDailyCouponSetting(context: FamilyBusinessContext, input: {
   workerId: string;
   isEnabled: boolean;
   dailyQuantity: number;
@@ -816,6 +913,7 @@ export function updateDailyCouponSetting(input: {
   randomMaxSeconds: number;
   requestId?: string;
 }) {
+  requireFamilyManager(context);
   assertMinuteRange(input.randomMinSeconds, input.randomMaxSeconds);
   if (!Number.isSafeInteger(input.dailyQuantity) || input.dailyQuantity < 0) {
     throw new AppError("每日派发张数必须是非负整数。", 400, "INVALID_DAILY_QUANTITY");
@@ -827,9 +925,9 @@ export function updateDailyCouponSetting(input: {
   const db = getDb();
   const mutationId = normalizedRequestId(input.requestId);
   return db.transaction(() => {
-    const previous = previousAuditTarget(db, mutationId);
+    const previous = previousAuditTarget(db, context.familyId, mutationId);
     if (previous) return { duplicated: true };
-    getWorker(db, input.workerId, true);
+    getWorker(db, context.familyId, input.workerId, true);
     const now = Date.now();
     db.prepare(`
       INSERT INTO worker_daily_coupon_settings(
@@ -851,7 +949,7 @@ export function updateDailyCouponSetting(input: {
     );
     audit(
       db,
-      "admin",
+      context,
       "daily_coupon_setting_updated",
       "worker",
       input.workerId,
@@ -868,26 +966,28 @@ function insertRewardItemFromDefinition(
   db: Db,
   definition: RewardDefinitionRow,
   values: {
+    familyId: string;
     workerId: string;
     batchId: string;
     sourceType: "admin_direct";
     sourceId?: string | null;
-    grantedBy: Actor;
+    grantedBy: StoredActor;
     now: number;
   },
 ) {
   const id = uniqueId();
   db.prepare(`
     INSERT INTO worker_reward_items(
-      id, worker_id, grant_batch_id, definition_id, definition_version,
+      id, family_id, worker_id, grant_batch_id, definition_id, definition_version,
       source_type, source_id, granted_by,
       name_snapshot, description_snapshot, icon_snapshot, theme_snapshot, kind,
       random_min_seconds, random_max_seconds, fixed_seconds,
       physical_description, fulfillment_instructions, image_id,
       status, expires_at, granted_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'available', NULL, ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'available', NULL, ?)
   `).run(
     id,
+    values.familyId,
     values.workerId,
     values.batchId,
     definition.id,
@@ -914,6 +1014,7 @@ function insertRewardItemFromDefinition(
 function insertDailyRewardItem(
   db: Db,
   values: {
+    familyId: string;
     workerId: string;
     batchId: string;
     dailyGrantId: string;
@@ -925,17 +1026,18 @@ function insertDailyRewardItem(
   const id = uniqueId();
   db.prepare(`
     INSERT INTO worker_reward_items(
-      id, worker_id, grant_batch_id, definition_id, definition_version,
+      id, family_id, worker_id, grant_batch_id, definition_id, definition_version,
       source_type, source_id, granted_by,
       name_snapshot, description_snapshot, icon_snapshot, theme_snapshot, kind,
       random_min_seconds, random_max_seconds, fixed_seconds,
       physical_description, fulfillment_instructions, image_id,
       status, expires_at, granted_at
-    ) VALUES (?, ?, ?, NULL, NULL, 'daily', ?, 'system',
+    ) VALUES (?, ?, ?, ?, NULL, NULL, 'daily', ?, 'system',
       '每日随机时间券', '今天的小惊喜，使用时会随机获得时间币。', 'sparkles', 'purple', 'random_time',
       ?, ?, NULL, NULL, NULL, NULL, 'available', NULL, ?)
   `).run(
     id,
+    values.familyId,
     values.workerId,
     values.batchId,
     values.dailyGrantId,
@@ -950,29 +1052,33 @@ function insertTaskRewardItem(
   db: Db,
   snapshot: AssignmentRewardItemRow,
   values: {
+    familyId: string;
     workerId: string;
     batchId: string;
     assignmentId: string;
+    grantedBy: StoredActor;
     now: number;
   },
 ) {
   const id = uniqueId();
   db.prepare(`
     INSERT INTO worker_reward_items(
-      id, worker_id, grant_batch_id, definition_id, definition_version,
+      id, family_id, worker_id, grant_batch_id, definition_id, definition_version,
       source_type, source_id, granted_by,
       name_snapshot, description_snapshot, icon_snapshot, theme_snapshot, kind,
       random_min_seconds, random_max_seconds, fixed_seconds,
       physical_description, fulfillment_instructions, image_id,
       status, expires_at, granted_at
-    ) VALUES (?, ?, ?, ?, ?, 'task', ?, 'admin', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'available', NULL, ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, 'task', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'available', NULL, ?)
   `).run(
     id,
+    values.familyId,
     values.workerId,
     values.batchId,
     snapshot.definition_id,
     snapshot.definition_version,
     values.assignmentId,
+    values.grantedBy,
     snapshot.name_snapshot,
     snapshot.description_snapshot,
     snapshot.icon_snapshot,
@@ -991,6 +1097,7 @@ function insertTaskRewardItem(
 
 export function grantAssignmentRewardsWithin(
   db: Db,
+  context: FamilyBusinessContext,
   input: {
     assignmentId: string;
     workerId: string;
@@ -1000,6 +1107,13 @@ export function grantAssignmentRewardsWithin(
     now: number;
   },
 ) {
+  requireFamilyManager(context);
+  const actor = actorAuditFields(context.actor);
+  getWorker(db, context.familyId, input.workerId);
+  const assignment = db
+    .prepare("SELECT id FROM task_assignments WHERE id = ? AND family_id = ? AND worker_id = ?")
+    .get(input.assignmentId, context.familyId, input.workerId);
+  if (!assignment) throw new AppError("没有找到这个任务记录。", 404, "ASSIGNMENT_NOT_FOUND");
   const snapshots = db.prepare(`
     SELECT * FROM assignment_reward_items
     WHERE assignment_id = ?
@@ -1009,17 +1123,19 @@ export function grantAssignmentRewardsWithin(
   if (snapshots.length === 0) {
     return { batchId: null, configuredQuantity: 0, awardedQuantity: 0 };
   }
-  assertRewardSystemEnabled(db);
+  assertRewardSystemEnabled(db, context.familyId);
   const batchId = uniqueId();
   const batchRequestId = `task-review:${input.requestId}`;
   db.prepare(`
     INSERT INTO reward_grant_batches(
-      id, worker_id, source_type, source_id, actor, reason, request_id, created_at
-    ) VALUES (?, ?, 'task', ?, 'admin', ?, ?, ?)
+      id, family_id, worker_id, source_type, source_id, actor, reason, request_id, created_at
+    ) VALUES (?, ?, ?, 'task', ?, ?, ?, ?, ?)
   `).run(
     batchId,
+    context.familyId,
     input.workerId,
     input.assignmentId,
+    actor.key,
     input.reviewNote || (input.excellent ? "优秀完成任务" : "任务审核通过"),
     batchRequestId,
     input.now,
@@ -1034,9 +1150,11 @@ export function grantAssignmentRewardsWithin(
       const awarded = rollPercent <= snapshot.probability_percent;
       const rewardItemId = awarded
         ? insertTaskRewardItem(db, snapshot, {
+          familyId: context.familyId,
           workerId: input.workerId,
           batchId,
           assignmentId: input.assignmentId,
+          grantedBy: actor.key,
           now: input.now,
         })
         : null;
@@ -1060,9 +1178,14 @@ export function grantAssignmentRewardsWithin(
   return { batchId, configuredQuantity, awardedQuantity };
 }
 
-export function grantDailyCouponsWithin(db: Db, workerId: string, now = Date.now()) {
-  const worker = getWorker(db, workerId, true);
-  if (!worker.is_active || !rewardSystemEnabledWithin(db)) return false;
+export function grantDailyCouponsWithin(
+  db: Db,
+  familyId: string,
+  workerId: string,
+  now = Date.now(),
+) {
+  const worker = getWorker(db, familyId, workerId, true);
+  if (!worker.is_active || !rewardSystemEnabledWithin(db, familyId)) return false;
   const setting = ensureDailySettingWithin(db, workerId, now);
   const localDate = dateKey(now, worker.timezone);
   const existing = db
@@ -1076,10 +1199,11 @@ export function grantDailyCouponsWithin(db: Db, workerId: string, now = Date.now
   const quantity = setting.is_enabled ? setting.daily_quantity : 0;
   const inserted = db.prepare(`
     INSERT OR IGNORE INTO reward_grant_batches(
-      id, worker_id, source_type, source_id, actor, reason, request_id, created_at
-    ) VALUES (?, ?, 'daily', ?, 'system', ?, ?, ?)
+      id, family_id, worker_id, source_type, source_id, actor, reason, request_id, created_at
+    ) VALUES (?, ?, ?, 'daily', ?, 'system', ?, ?, ?)
   `).run(
     batchId,
+    familyId,
     workerId,
     dailyGrantId,
     quantity > 0 ? `每日免费派发 ${quantity} 张随机时间券` : "今日每日派券设置为关闭",
@@ -1107,6 +1231,7 @@ export function grantDailyCouponsWithin(db: Db, workerId: string, now = Date.now
   );
   for (let index = 0; index < quantity; index += 1) {
     insertDailyRewardItem(db, {
+      familyId,
       workerId,
       batchId,
       dailyGrantId,
@@ -1118,13 +1243,14 @@ export function grantDailyCouponsWithin(db: Db, workerId: string, now = Date.now
   return true;
 }
 
-export function grantRewardDefinition(input: {
+export function grantRewardDefinition(context: FamilyBusinessContext, input: {
   workerId: string;
   definitionId: string;
   quantity: number;
   reason: string;
   requestId?: string;
 }) {
+  requireFamilyManager(context);
   if (!Number.isSafeInteger(input.quantity) || input.quantity <= 0) {
     throw new AppError("发放数量必须是正整数。", 400, "INVALID_REWARD_QUANTITY");
   }
@@ -1136,41 +1262,43 @@ export function grantRewardDefinition(input: {
   const mutationId = normalizedRequestId(input.requestId);
   return db.transaction(() => {
     const previous = db
-      .prepare("SELECT id FROM reward_grant_batches WHERE request_id = ?")
-      .get(mutationId) as { id: string } | undefined;
+      .prepare("SELECT id FROM reward_grant_batches WHERE family_id = ? AND request_id = ?")
+      .get(context.familyId, mutationId) as { id: string } | undefined;
     if (previous) {
       const rows = db
         .prepare("SELECT id FROM worker_reward_items WHERE grant_batch_id = ? ORDER BY granted_at, id")
         .all(previous.id) as Array<{ id: string }>;
       return { duplicated: true, batchId: previous.id, rewardItemIds: rows.map((row) => row.id) };
     }
-    assertRewardSystemEnabled(db);
-    getWorker(db, input.workerId);
-    const definition = getDefinition(db, input.definitionId);
+    assertRewardSystemEnabled(db, context.familyId);
+    getWorker(db, context.familyId, input.workerId);
+    const definition = getDefinition(db, context.familyId, input.definitionId);
     if (!definition.is_active) {
       throw new AppError("这个奖励券模板已经停用。", 409, "REWARD_DEFINITION_DISABLED");
     }
     const batchId = uniqueId();
     const now = Date.now();
+    const actor = actorAuditFields(context.actor);
     db.prepare(`
       INSERT INTO reward_grant_batches(
-        id, worker_id, source_type, source_id, actor, reason, request_id, created_at
-      ) VALUES (?, ?, 'admin_direct', ?, 'admin', ?, ?, ?)
-    `).run(batchId, input.workerId, definition.id, reason, mutationId, now);
+        id, family_id, worker_id, source_type, source_id, actor, reason, request_id, created_at
+      ) VALUES (?, ?, ?, 'admin_direct', ?, ?, ?, ?, ?)
+    `).run(batchId, context.familyId, input.workerId, definition.id, actor.key, reason, mutationId, now);
     const rewardItemIds: string[] = [];
     for (let index = 0; index < input.quantity; index += 1) {
       rewardItemIds.push(insertRewardItemFromDefinition(db, definition, {
+        familyId: context.familyId,
         workerId: input.workerId,
         batchId,
         sourceType: "admin_direct",
         sourceId: definition.id,
-        grantedBy: "admin",
+        grantedBy: actor.key,
         now,
       }));
     }
     audit(
       db,
-      "admin",
+      context,
       "reward_items_granted",
       "reward_grant_batch",
       batchId,
@@ -1181,11 +1309,12 @@ export function grantRewardDefinition(input: {
   }).immediate();
 }
 
-export function cancelRewardItem(input: {
+export function cancelRewardItem(context: FamilyBusinessContext, input: {
   rewardItemId: string;
   reason: string;
   requestId?: string;
 }) {
+  requireFamilyManager(context);
   const reason = input.reason.trim();
   if (!reason || reason.length > 500) {
     throw new AppError("请填写 1～500 个字的撤销原因。", 400, "CANCELLATION_REASON_REQUIRED");
@@ -1193,14 +1322,14 @@ export function cancelRewardItem(input: {
   const db = getDb();
   const mutationId = normalizedRequestId(input.requestId);
   return db.transaction(() => {
-    const previous = previousAuditTarget(db, mutationId);
+    const previous = previousAuditTarget(db, context.familyId, mutationId);
     if (previous) {
       if (previous.target_id !== input.rewardItemId) {
         throw new AppError("请求编号已用于另一项操作。", 409, "REQUEST_ID_CONFLICT");
       }
       return { duplicated: true };
     }
-    const item = getRewardItem(db, input.rewardItemId);
+    const item = getRewardItem(db, context.familyId, input.rewardItemId);
     if (item.status !== "available") {
       throw new AppError("只有尚未使用的奖励券可以撤销。", 409, "REWARD_ITEM_NOT_AVAILABLE");
     }
@@ -1210,7 +1339,7 @@ export function cancelRewardItem(input: {
       SET status = 'cancelled', cancelled_at = ?, cancellation_reason = ?
       WHERE id = ? AND status = 'available'
     `).run(now, reason, item.id);
-    audit(db, "admin", "reward_item_cancelled", "worker_reward_item", item.id, reason, mutationId);
+    audit(db, context, "reward_item_cancelled", "worker_reward_item", item.id, reason, mutationId);
     return { duplicated: false };
   }).immediate();
 }
@@ -1226,19 +1355,30 @@ type RewardUseRow = {
   created_at: number;
 };
 
-function previousUse(db: Db, mutationId: string, rewardItemId: string) {
+function previousUse(db: Db, familyId: string, mutationId: string, rewardItemId: string) {
   const use = db
-    .prepare("SELECT * FROM reward_coupon_uses WHERE request_id = ?")
-    .get(mutationId) as RewardUseRow | undefined;
+    .prepare(`
+      SELECT use.*
+      FROM reward_coupon_uses use
+      JOIN worker_reward_items item ON item.id = use.reward_item_id
+      WHERE use.request_id = ? AND item.family_id = ?
+    `)
+    .get(mutationId, familyId) as RewardUseRow | undefined;
   if (use && use.reward_item_id !== rewardItemId) {
     throw new AppError("请求编号已用于另一张奖励券。", 409, "REQUEST_ID_CONFLICT");
   }
   return use;
 }
 
-function assertUsableRewardItem(db: Db, workerId: string, rewardItemId: string, now: number) {
-  assertRewardSystemEnabled(db);
-  const item = getRewardItem(db, rewardItemId);
+function assertUsableRewardItem(
+  db: Db,
+  familyId: string,
+  workerId: string,
+  rewardItemId: string,
+  now: number,
+) {
+  assertRewardSystemEnabled(db, familyId);
+  const item = getRewardItem(db, familyId, rewardItemId);
   if (item.worker_id !== workerId) {
     throw new AppError("不能使用别人的奖励券。", 403, "FORBIDDEN");
   }
@@ -1252,15 +1392,18 @@ function assertUsableRewardItem(db: Db, workerId: string, rewardItemId: string, 
   return item;
 }
 
-export function redeemTimeReward(input: {
+export function redeemTimeReward(context: FamilyBusinessContext, input: {
   workerId: string;
   rewardItemId: string;
   requestId?: string;
 }) {
+  if (!actorCanOperateWorker(context, input.workerId, false)) {
+    throw new AppError("不能使用别人的奖励券。", 403, "FORBIDDEN");
+  }
   const db = getDb();
   const mutationId = normalizedRequestId(input.requestId);
   return db.transaction(() => {
-    const existing = previousUse(db, mutationId, input.rewardItemId);
+    const existing = previousUse(db, context.familyId, mutationId, input.rewardItemId);
     if (existing) {
       return {
         duplicated: true,
@@ -1269,32 +1412,45 @@ export function redeemTimeReward(input: {
       };
     }
     const now = Date.now();
-    const item = assertUsableRewardItem(db, input.workerId, input.rewardItemId, now);
+    const item = assertUsableRewardItem(
+      db,
+      context.familyId,
+      input.workerId,
+      input.rewardItemId,
+      now,
+    );
     if (item.kind === "physical") {
       throw new AppError("实物券需要在收到实物后输入当前密码确认。", 409, "PHYSICAL_CONFIRMATION_REQUIRED");
     }
-    const worker = getWorker(db, input.workerId);
+    const worker = getWorker(db, context.familyId, input.workerId);
     const resultSeconds = item.kind === "random_time"
       ? randomInt(item.random_min_seconds! / MINUTE, item.random_max_seconds! / MINUTE + 1) * MINUTE
       : item.fixed_seconds!;
     const nextBalance = worker.balance_seconds + resultSeconds;
     const transactionId = uniqueId();
+    const actor = actorAuditFields(context.actor);
     db.prepare("UPDATE workers SET balance_seconds = ?, updated_at = ? WHERE id = ?")
       .run(nextBalance, now, worker.id);
     db.prepare(`
       INSERT INTO transactions(
-        id, worker_id, type, title, amount_seconds, balance_after_seconds,
+        id, family_id, worker_id, type, title, amount_seconds, balance_after_seconds,
         assignment_id, consumption_activity_id, reward_item_id,
-        actor, reason, request_id, started_at, ended_at, created_at
-      ) VALUES (?, ?, 'coupon_reward', ?, ?, ?, NULL, NULL, ?, ?, ?, ?, NULL, NULL, ?)
+        actor, actor_type, actor_id, actor_name_snapshot, acting_for_worker_id,
+        reason, request_id, started_at, ended_at, created_at
+      ) VALUES (?, ?, ?, 'coupon_reward', ?, ?, ?, NULL, NULL, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?)
     `).run(
       transactionId,
+      context.familyId,
       worker.id,
       item.kind === "random_time" ? `随机时间券：${item.name_snapshot}` : `固定时间券：${item.name_snapshot}`,
       resultSeconds,
       nextBalance,
       item.id,
-      `worker:${worker.id}`,
+      actor.key,
+      actor.type,
+      actor.id,
+      actor.name,
+      actor.actingForWorkerId,
       item.kind === "random_time" ? `随机获得 ${resultSeconds / MINUTE} 分钟` : `使用固定 ${resultSeconds / MINUTE} 分钟券`,
       mutationId,
       now,
@@ -1326,7 +1482,7 @@ export function redeemTimeReward(input: {
     }
     audit(
       db,
-      `worker:${worker.id}`,
+      context,
       "reward_item_redeemed",
       "worker_reward_item",
       item.id,
@@ -1337,18 +1493,21 @@ export function redeemTimeReward(input: {
   }).immediate();
 }
 
-export async function confirmPhysicalReward(input: {
+export async function confirmPhysicalReward(context: FamilyBusinessContext, input: {
   workerId: string;
   rewardItemId: string;
   password: string;
   requestId?: string;
 }) {
+  if (context.actor.type !== "worker" || context.actor.workerId !== input.workerId) {
+    throw new AppError("实物收到确认必须由小朋友本人登录后完成。", 403, "WORKER_CONFIRMATION_REQUIRED");
+  }
   const db = getDb();
   const mutationId = normalizedRequestId(input.requestId);
-  const existing = previousUse(db, mutationId, input.rewardItemId);
+  const existing = previousUse(db, context.familyId, mutationId, input.rewardItemId);
   if (existing) return { duplicated: true, fulfilledAt: existing.created_at };
 
-  const item = getRewardItem(db, input.rewardItemId);
+  const item = getRewardItem(db, context.familyId, input.rewardItemId);
   if (item.worker_id !== input.workerId) {
     throw new AppError("不能确认别人的实物券。", 403, "FORBIDDEN");
   }
@@ -1358,17 +1517,23 @@ export async function confirmPhysicalReward(input: {
   if (item.status !== "available") {
     throw new AppError("这张实物券已经处理过了。", 409, "REWARD_ITEM_NOT_AVAILABLE");
   }
-  assertRewardSystemEnabled(db);
-  const worker = getWorker(db, input.workerId);
+  assertRewardSystemEnabled(db, context.familyId);
+  const worker = getWorker(db, context.familyId, input.workerId);
   if (!(await verifyPassword(input.password, worker.password_hash))) {
     throw new AppError("密码不正确，请再试一次。", 401, "INVALID_PASSWORD");
   }
 
   return db.transaction(() => {
-    const duplicate = previousUse(db, mutationId, input.rewardItemId);
+    const duplicate = previousUse(db, context.familyId, mutationId, input.rewardItemId);
     if (duplicate) return { duplicated: true, fulfilledAt: duplicate.created_at };
     const now = Date.now();
-    const current = assertUsableRewardItem(db, input.workerId, input.rewardItemId, now);
+    const current = assertUsableRewardItem(
+      db,
+      context.familyId,
+      input.workerId,
+      input.rewardItemId,
+      now,
+    );
     if (current.kind !== "physical") {
       throw new AppError("只有实物券需要密码确认。", 409, "NOT_PHYSICAL_REWARD");
     }
@@ -1388,7 +1553,7 @@ export async function confirmPhysicalReward(input: {
     }
     audit(
       db,
-      `worker:${input.workerId}`,
+      context,
       "physical_reward_fulfilled",
       "worker_reward_item",
       current.id,
@@ -1409,16 +1574,16 @@ const rewardItemSelect = `
   LEFT JOIN reward_coupon_uses u ON u.reward_item_id = i.id
 `;
 
-function listWorkerRewardItems(db: Db, workerId: string) {
+function listWorkerRewardItems(db: Db, familyId: string, workerId: string) {
   return (db.prepare(`
     ${rewardItemSelect}
-    WHERE i.worker_id = ?
+    WHERE i.worker_id = ? AND i.family_id = ?
     ORDER BY i.granted_at DESC, i.id DESC
     LIMIT 300
-  `).all(workerId) as RewardItemJoined[]).map(publicRewardItem);
+  `).all(workerId, familyId) as RewardItemJoined[]).map(publicRewardItem);
 }
 
-function listAdminRewardItems(db: Db) {
+function listAdminRewardItems(db: Db, familyId: string) {
   return (db.prepare(`
     SELECT i.*, b.reason AS grant_reason,
       u.result_seconds AS result_seconds,
@@ -1429,22 +1594,27 @@ function listAdminRewardItems(db: Db) {
     JOIN reward_grant_batches b ON b.id = i.grant_batch_id
     JOIN workers w ON w.id = i.worker_id
     LEFT JOIN reward_coupon_uses u ON u.reward_item_id = i.id
+    WHERE i.family_id = ?
     ORDER BY i.granted_at DESC, i.id DESC
     LIMIT 500
-  `).all() as RewardItemJoined[]).map(publicRewardItem);
+  `).all(familyId) as RewardItemJoined[]).map(publicRewardItem);
 }
 
-export function getWorkerRewardState(workerId: string, now = Date.now()) {
+export function getWorkerRewardState(
+  context: FamilyBusinessContext,
+  workerId: string,
+  now = Date.now(),
+) {
   const db = getDb();
-  const worker = getWorker(db, workerId);
+  const worker = getWorker(db, context.familyId, workerId);
   const setting = ensureDailySettingWithin(db, workerId, now);
   const today = dateKey(now, worker.timezone);
   const dailyGrant = db
     .prepare("SELECT * FROM daily_coupon_grants WHERE worker_id = ? AND local_date = ?")
     .get(workerId, today) as DailyCouponGrantRow | undefined;
-  const rewardItems = listWorkerRewardItems(db, workerId);
+  const rewardItems = listWorkerRewardItems(db, context.familyId, workerId);
   return {
-    rewardSystemEnabled: rewardSystemEnabledWithin(db),
+    rewardSystemEnabled: rewardSystemEnabledWithin(db, context.familyId),
     rewardItems,
     availableRewardCount: rewardItems.filter((item) => item.status === "available").length,
     dailyCouponSetting: publicDailySetting(setting),
@@ -1452,7 +1622,7 @@ export function getWorkerRewardState(workerId: string, now = Date.now()) {
   };
 }
 
-export function getAdminRewardState(now = Date.now()) {
+export function getAdminRewardState(context: FamilyBusinessContext, now = Date.now()) {
   const db = getDb();
   const definitions = (db
     .prepare(`
@@ -1470,9 +1640,10 @@ export function getAdminRewardState(now = Date.now()) {
           WHERE image.definition_id = definition.id
         ) AS image_snapshot_count
       FROM reward_definitions definition
+      WHERE definition.family_id = ?
       ORDER BY definition.is_active DESC, definition.created_at DESC
     `)
-    .all() as RewardDefinitionWithUsageRow[]).map((row) => {
+    .all(context.familyId) as RewardDefinitionWithUsageRow[]).map((row) => {
     const usage: RewardDefinitionUsage = {
       taskBindingCount: row.task_binding_count,
       assignmentSnapshotCount: row.assignment_snapshot_count,
@@ -1488,14 +1659,26 @@ export function getAdminRewardState(now = Date.now()) {
     };
   });
   const settings = (db
-    .prepare("SELECT * FROM worker_daily_coupon_settings ORDER BY worker_id")
-    .all() as DailyCouponSettingRow[]).map(publicDailySetting);
+    .prepare(`
+      SELECT setting.*
+      FROM worker_daily_coupon_settings setting
+      JOIN workers worker ON worker.id = setting.worker_id
+      WHERE worker.family_id = ?
+      ORDER BY setting.worker_id
+    `)
+    .all(context.familyId) as DailyCouponSettingRow[]).map(publicDailySetting);
   const dailyGrants = (db
-    .prepare("SELECT * FROM daily_coupon_grants ORDER BY created_at DESC LIMIT 200")
-    .all() as DailyCouponGrantRow[]).map(publicDailyGrant);
+    .prepare(`
+      SELECT grant_row.*
+      FROM daily_coupon_grants grant_row
+      JOIN workers worker ON worker.id = grant_row.worker_id
+      WHERE worker.family_id = ?
+      ORDER BY grant_row.created_at DESC LIMIT 200
+    `)
+    .all(context.familyId) as DailyCouponGrantRow[]).map(publicDailyGrant);
   const workers = db
-    .prepare("SELECT id, timezone FROM workers")
-    .all() as Array<{ id: string; timezone: string }>;
+    .prepare("SELECT id, timezone FROM workers WHERE family_id = ?")
+    .all(context.familyId) as Array<{ id: string; timezone: string }>;
   const todayByWorker = Object.fromEntries(workers.map((worker) => [worker.id, dateKey(now, worker.timezone)]));
   const todayDailyCouponGrants = Object.fromEntries(
     dailyGrants
@@ -1503,9 +1686,9 @@ export function getAdminRewardState(now = Date.now()) {
       .map((grant) => [grant.workerId, grant]),
   );
   return {
-    rewardSystemEnabled: rewardSystemEnabledWithin(db),
+    rewardSystemEnabled: rewardSystemEnabledWithin(db, context.familyId),
     rewardDefinitions: definitions,
-    rewardItems: listAdminRewardItems(db),
+    rewardItems: listAdminRewardItems(db, context.familyId),
     dailyCouponSettings: settings,
     dailyCouponGrants: dailyGrants,
     todayDailyCouponGrants,

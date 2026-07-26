@@ -1,5 +1,7 @@
 import type { NextRequest } from "next/server";
+import { businessContextFromSession } from "@/lib/business-session";
 import { getRewardDefinitionImage } from "@/lib/reward-service";
+import { getRequestSession } from "@/lib/session";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -9,7 +11,9 @@ export async function GET(
   context: { params: Promise<{ imageId: string }> },
 ) {
   const { imageId } = await context.params;
-  const rewardImage = getRewardDefinitionImage(imageId);
+  const businessContext = businessContextFromSession(getRequestSession(request));
+  if (!businessContext) return new Response(null, { status: 404 });
+  const rewardImage = getRewardDefinitionImage(businessContext, imageId);
   if (!rewardImage) return new Response(null, { status: 404 });
 
   const etag = `"${rewardImage.id}-${rewardImage.created_at}"`;
@@ -20,7 +24,7 @@ export async function GET(
     headers: {
       "Content-Type": rewardImage.mime_type,
       "Content-Length": String(rewardImage.image_data.length),
-      "Cache-Control": "public, max-age=31536000, immutable",
+      "Cache-Control": "private, no-cache",
       ETag: etag,
       "X-Content-Type-Options": "nosniff",
     },

@@ -1,7 +1,7 @@
 import path from "node:path";
 
 export type AppConfig = {
-  adminPassword: string;
+  systemAdminPassword: string;
   sessionSecret: string;
   timezone: string;
   databasePath: string;
@@ -14,11 +14,14 @@ let cachedConfig: AppConfig | undefined;
 export function getConfig(): AppConfig {
   if (cachedConfig) return cachedConfig;
 
-  const adminPassword = process.env.ADMIN_PASSWORD?.trim();
+  const systemAdminPassword = process.env.SYSTEM_ADMIN_PASSWORD?.trim()
+    || process.env.ADMIN_PASSWORD?.trim();
   const sessionSecret = process.env.SESSION_SECRET?.trim();
 
-  if (!adminPassword) {
-    throw new Error("缺少 ADMIN_PASSWORD，请通过环境变量、.env.local 或 .env 配置管理员密码。");
+  if (!systemAdminPassword) {
+    throw new Error(
+      "缺少 SYSTEM_ADMIN_PASSWORD（升级期间也可继续使用 ADMIN_PASSWORD），请通过环境变量、.env.local 或 .env 配置。",
+    );
   }
   if (!sessionSecret || sessionSecret.length < 32) {
     throw new Error("SESSION_SECRET 必须至少包含 32 个字符。");
@@ -28,7 +31,7 @@ export function getConfig(): AppConfig {
   const rawDatabasePath = process.env.DATABASE_PATH || "./data/pen-worker.db";
 
   cachedConfig = {
-    adminPassword,
+    systemAdminPassword,
     sessionSecret,
     timezone: process.env.APP_TIMEZONE || "Asia/Shanghai",
     databasePath: path.isAbsolute(rawDatabasePath)

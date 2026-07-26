@@ -44,3 +44,22 @@ export function mutationId() {
   }
   return `request-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
 }
+
+export async function copyText(value: string) {
+  if (typeof navigator !== "undefined" && navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(value);
+    return;
+  }
+  if (typeof document === "undefined") {
+    throw new Error("当前环境无法复制链接。");
+  }
+  const input = document.createElement("textarea");
+  input.value = value;
+  input.style.position = "fixed";
+  input.style.opacity = "0";
+  document.body.appendChild(input);
+  input.select();
+  const copied = document.execCommand("copy");
+  input.remove();
+  if (!copied) throw new Error("当前浏览器无法自动复制，请长按链接手动复制。");
+}

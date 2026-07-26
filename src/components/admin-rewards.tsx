@@ -40,7 +40,7 @@ const kindLabels: Record<RewardKind, string> = {
 const sourceLabels: Record<RewardItem["sourceType"], string> = {
   daily: "每日派发",
   task: "任务发放",
-  admin_direct: "管理员直发",
+  admin_direct: "老板直发",
   achievement: "成就奖励",
   adjustment: "补发纠错",
 };
@@ -188,7 +188,7 @@ export function RewardSettingsPanel({
             </div>
             <p className="mt-2 text-sm font-semibold leading-6 text-slate-600">
               {state.rewardSystemEnabled
-                ? "每日派发、管理员直发和打工人使用均正常开放。"
+                ? "每日派发、老板直发和打工人使用均正常开放。"
                 : "暂停期间不会新发券，也不能使用；已有奖励券和历史记录会完整保留。"}
             </p>
           </div>
@@ -684,7 +684,7 @@ export function AdminRewardHistoryPanel({ state, mutate, busy }: { state: AdminS
         <div className="grid grid-cols-2 gap-2 border-b border-purple-100 p-3 sm:grid-cols-4">
           <select aria-label="按打工人筛选奖励历史" className="field !min-h-10 !py-2 text-sm" value={workerFilter} onChange={(event) => setWorkerFilter(event.target.value)}><option value="all">全部打工人</option>{state.workers.map((worker) => <option key={worker.id} value={worker.id}>{worker.name}</option>)}</select>
           <select aria-label="按类型筛选奖励历史" className="field !min-h-10 !py-2 text-sm" value={kindFilter} onChange={(event) => setKindFilter(event.target.value as typeof kindFilter)}><option value="all">全部类型</option><option value="random_time">随机券</option><option value="fixed_time">固定券</option><option value="physical">实物券</option></select>
-          <select aria-label="按来源筛选奖励历史" className="field !min-h-10 !py-2 text-sm" value={sourceFilter} onChange={(event) => setSourceFilter(event.target.value as typeof sourceFilter)}><option value="all">全部来源</option><option value="daily">每日派发</option><option value="task">任务发放</option><option value="admin_direct">管理员直发</option><option value="achievement">成就奖励</option><option value="adjustment">补发纠错</option></select>
+          <select aria-label="按来源筛选奖励历史" className="field !min-h-10 !py-2 text-sm" value={sourceFilter} onChange={(event) => setSourceFilter(event.target.value as typeof sourceFilter)}><option value="all">全部来源</option><option value="daily">每日派发</option><option value="task">任务发放</option><option value="admin_direct">老板直发</option><option value="achievement">成就奖励</option><option value="adjustment">补发纠错</option></select>
           <select aria-label="按状态筛选奖励历史" className="field !min-h-10 !py-2 text-sm" value={statusFilter} onChange={(event) => setStatusFilter(event.target.value as typeof statusFilter)}><option value="all">全部状态</option><option value="available">可使用</option><option value="redeemed">已使用</option><option value="fulfilled">已收到</option><option value="cancelled">已撤销</option><option value="expired">已过期</option></select>
         </div>
         <div className="divide-y divide-purple-50">
@@ -764,7 +764,7 @@ function AdminRewardDetailDialog({
 
         <div className="mt-2 space-y-1 rounded-xl bg-purple-50 px-3 py-2 text-xs font-semibold leading-5 text-purple-900">
           <p><strong>发放原因：</strong>{item.grantReason || "未填写"}</p>
-          {item.grantedBy && <p><strong>发放人：</strong>{item.grantedBy === "admin" ? "管理员" : item.grantedBy}</p>}
+          {item.grantedBy && <p><strong>发放人：</strong>{item.grantedBy === "admin" ? "旧版管理员" : item.grantedBy.startsWith("boss:") ? "家庭老板" : item.grantedBy}</p>}
         </div>
 
         {item.kind === "physical" && (item.physicalDescription || item.fulfillmentInstructions) && (

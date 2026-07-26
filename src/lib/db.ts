@@ -1,4 +1,5 @@
 import Database from "better-sqlite3";
+import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { getConfig } from "@/lib/config";
@@ -8,7 +9,63 @@ declare global {
   var __penWorkerSchemaVersion: number | undefined;
 }
 
-const CURRENT_SCHEMA_VERSION = 8;
+const CURRENT_SCHEMA_VERSION = 12;
+
+// Stable compatibility tenant for migrated rows and the root family picker.
+export const DEFAULT_FAMILY_ID = "00000000-0000-4000-8000-000000000001";
+export const DEFAULT_FAMILY_NAME = "我的家庭";
+
+const FAMILY_SCHEMA = `
+CREATE TABLE IF NOT EXISTS families (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL CHECK(length(trim(name)) BETWEEN 1 AND 60),
+  timezone TEXT NOT NULL DEFAULT 'Asia/Shanghai',
+  status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active', 'inactive')),
+  entry_code TEXT NOT NULL UNIQUE CHECK(length(entry_code) BETWEEN 16 AND 100),
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS boss_accounts (
+  id TEXT PRIMARY KEY,
+  username TEXT NOT NULL COLLATE NOCASE UNIQUE
+    CHECK(length(trim(username)) BETWEEN 3 AND 50),
+  display_name TEXT NOT NULL CHECK(length(trim(display_name)) BETWEEN 1 AND 60),
+  password_hash TEXT NOT NULL CHECK(length(password_hash) > 0),
+  auth_version INTEGER NOT NULL DEFAULT 1 CHECK(auth_version > 0),
+  is_active INTEGER NOT NULL DEFAULT 1 CHECK(is_active IN (0, 1)),
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS family_bosses (
+  family_id TEXT NOT NULL REFERENCES families(id) ON DELETE RESTRICT,
+  boss_id TEXT NOT NULL REFERENCES boss_accounts(id) ON DELETE RESTRICT,
+  display_name_override TEXT
+    CHECK(display_name_override IS NULL OR length(trim(display_name_override)) BETWEEN 1 AND 60),
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY(family_id, boss_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_family_bosses_boss
+  ON family_bosses(boss_id, family_id);
+`;
+
+const SYSTEM_ACCOUNT_SCHEMA = `
+CREATE TABLE IF NOT EXISTS system_audit_logs (
+  id TEXT PRIMARY KEY,
+  actor TEXT NOT NULL DEFAULT 'system_admin' CHECK(actor = 'system_admin'),
+  action TEXT NOT NULL,
+  target_type TEXT NOT NULL,
+  target_id TEXT,
+  detail TEXT,
+  request_id TEXT UNIQUE,
+  created_at INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_system_audit_logs_created
+  ON system_audit_logs(created_at DESC);
+`;
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -16,8 +73,13 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
   applied_at INTEGER NOT NULL
 );
 
+${FAMILY_SCHEMA}
+${SYSTEM_ACCOUNT_SCHEMA}
+
 CREATE TABLE IF NOT EXISTS workers (
   id TEXT PRIMARY KEY,
+  family_id TEXT NOT NULL DEFAULT '${DEFAULT_FAMILY_ID}'
+    REFERENCES families(id) ON DELETE RESTRICT,
   name TEXT NOT NULL CHECK(length(trim(name)) BETWEEN 1 AND 30),
   avatar TEXT NOT NULL DEFAULT 'star',
   theme TEXT NOT NULL DEFAULT 'purple',
@@ -40,6 +102,8 @@ CREATE TABLE IF NOT EXISTS worker_avatar_images (
 
 CREATE TABLE IF NOT EXISTS tasks (
   id TEXT PRIMARY KEY,
+  family_id TEXT NOT NULL DEFAULT '${DEFAULT_FAMILY_ID}'
+    REFERENCES families(id) ON DELETE RESTRICT,
   title TEXT NOT NULL CHECK(length(trim(title)) BETWEEN 1 AND 60),
   description TEXT NOT NULL DEFAULT '',
   reward_seconds INTEGER NOT NULL CHECK(reward_seconds > 0 AND reward_seconds <= 86400),
@@ -59,6 +123,8 @@ CREATE TABLE IF NOT EXISTS tasks (
 
 CREATE TABLE IF NOT EXISTS task_assignments (
   id TEXT PRIMARY KEY,
+  family_id TEXT NOT NULL DEFAULT '${DEFAULT_FAMILY_ID}'
+    REFERENCES families(id) ON DELETE RESTRICT,
   task_id TEXT NOT NULL REFERENCES tasks(id),
   worker_id TEXT NOT NULL REFERENCES workers(id),
   title_snapshot TEXT NOT NULL,
@@ -89,6 +155,8 @@ CREATE TABLE IF NOT EXISTS task_assignments (
 
 CREATE TABLE IF NOT EXISTS consumption_activities (
   id TEXT PRIMARY KEY,
+  family_id TEXT NOT NULL DEFAULT '${DEFAULT_FAMILY_ID}'
+    REFERENCES families(id) ON DELETE RESTRICT,
   name TEXT NOT NULL CHECK(length(trim(name)) BETWEEN 1 AND 30),
   icon TEXT NOT NULL DEFAULT 'gamepad',
   sort_order INTEGER NOT NULL DEFAULT 0,
@@ -140,6 +208,8 @@ CREATE TABLE IF NOT EXISTS timer_adjustments (
 
 CREATE TABLE IF NOT EXISTS transactions (
   id TEXT PRIMARY KEY,
+  family_id TEXT NOT NULL DEFAULT '${DEFAULT_FAMILY_ID}'
+    REFERENCES families(id) ON DELETE RESTRICT,
   worker_id TEXT NOT NULL REFERENCES workers(id),
   type TEXT NOT NULL CHECK(type IN ('daily_reward', 'task_reward', 'consumption', 'admin_adjustment', 'coupon_reward')),
   title TEXT NOT NULL,
@@ -149,6 +219,10 @@ CREATE TABLE IF NOT EXISTS transactions (
   consumption_activity_id TEXT REFERENCES consumption_activities(id),
   reward_item_id TEXT REFERENCES worker_reward_items(id),
   actor TEXT NOT NULL,
+  actor_type TEXT NOT NULL DEFAULT 'legacy',
+  actor_id TEXT,
+  actor_name_snapshot TEXT,
+  acting_for_worker_id TEXT,
   reason TEXT,
   request_id TEXT UNIQUE,
   started_at INTEGER,
@@ -158,6 +232,8 @@ CREATE TABLE IF NOT EXISTS transactions (
 
 CREATE TABLE IF NOT EXISTS reward_requests (
   id TEXT PRIMARY KEY,
+  family_id TEXT NOT NULL DEFAULT '${DEFAULT_FAMILY_ID}'
+    REFERENCES families(id) ON DELETE RESTRICT,
   worker_id TEXT NOT NULL REFERENCES workers(id),
   title TEXT NOT NULL CHECK(length(trim(title)) BETWEEN 1 AND 60),
   description TEXT NOT NULL DEFAULT '',
@@ -193,7 +269,13 @@ CREATE TABLE IF NOT EXISTS daily_grants (
 
 CREATE TABLE IF NOT EXISTS audit_logs (
   id TEXT PRIMARY KEY,
+  family_id TEXT NOT NULL DEFAULT '${DEFAULT_FAMILY_ID}'
+    REFERENCES families(id) ON DELETE RESTRICT,
   actor TEXT NOT NULL,
+  actor_type TEXT NOT NULL DEFAULT 'legacy',
+  actor_id TEXT,
+  actor_name_snapshot TEXT,
+  acting_for_worker_id TEXT,
   action TEXT NOT NULL,
   target_type TEXT NOT NULL,
   target_id TEXT,
@@ -203,13 +285,18 @@ CREATE TABLE IF NOT EXISTS audit_logs (
 );
 
 CREATE TABLE IF NOT EXISTS app_settings (
-  key TEXT PRIMARY KEY,
+  family_id TEXT NOT NULL DEFAULT '${DEFAULT_FAMILY_ID}'
+    REFERENCES families(id) ON DELETE RESTRICT,
+  key TEXT NOT NULL,
   value TEXT NOT NULL,
-  updated_at INTEGER NOT NULL
+  updated_at INTEGER NOT NULL,
+  PRIMARY KEY(family_id, key)
 );
 
 CREATE TABLE IF NOT EXISTS reward_definitions (
   id TEXT PRIMARY KEY,
+  family_id TEXT NOT NULL DEFAULT '${DEFAULT_FAMILY_ID}'
+    REFERENCES families(id) ON DELETE RESTRICT,
   name TEXT NOT NULL CHECK(length(trim(name)) BETWEEN 1 AND 60),
   description TEXT NOT NULL DEFAULT '' CHECK(length(description) <= 600),
   icon TEXT NOT NULL,
@@ -341,6 +428,8 @@ CREATE TABLE IF NOT EXISTS assignment_reward_items (
 
 CREATE TABLE IF NOT EXISTS reward_grant_batches (
   id TEXT PRIMARY KEY,
+  family_id TEXT NOT NULL DEFAULT '${DEFAULT_FAMILY_ID}'
+    REFERENCES families(id) ON DELETE RESTRICT,
   worker_id TEXT NOT NULL REFERENCES workers(id),
   source_type TEXT NOT NULL
     CHECK(source_type IN ('daily', 'task', 'admin_direct', 'achievement', 'adjustment')),
@@ -353,6 +442,8 @@ CREATE TABLE IF NOT EXISTS reward_grant_batches (
 
 CREATE TABLE IF NOT EXISTS worker_reward_items (
   id TEXT PRIMARY KEY,
+  family_id TEXT NOT NULL DEFAULT '${DEFAULT_FAMILY_ID}'
+    REFERENCES families(id) ON DELETE RESTRICT,
   worker_id TEXT NOT NULL REFERENCES workers(id),
   grant_batch_id TEXT NOT NULL REFERENCES reward_grant_batches(id),
   definition_id TEXT REFERENCES reward_definitions(id) ON DELETE RESTRICT,
@@ -766,19 +857,310 @@ export function migrateRepeatableTaskSchema(db: Database.Database, now = Date.no
   db.prepare("INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (8, ?)").run(now);
 }
 
+const FAMILY_SCOPED_TABLES = [
+  "workers",
+  "tasks",
+  "task_assignments",
+  "consumption_activities",
+  "transactions",
+  "reward_requests",
+  "audit_logs",
+  "reward_definitions",
+  "reward_grant_batches",
+  "worker_reward_items",
+] as const;
+
+function tableExists(db: Database.Database, table: string): boolean {
+  return Boolean(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(table));
+}
+
+function tableHasColumn(db: Database.Database, table: string, column: string): boolean {
+  if (!tableExists(db, table)) return false;
+  return (db.pragma(`table_info(${table})`) as Array<{ name: string }>).some((item) => item.name === column);
+}
+
+function ensureDefaultFamily(db: Database.Database, now: number, timezone: string): void {
+  db.prepare(`
+    INSERT OR IGNORE INTO families(
+      id, name, timezone, status, entry_code, created_at, updated_at
+    ) VALUES (?, ?, ?, 'active', ?, ?, ?)
+  `).run(
+    DEFAULT_FAMILY_ID,
+    DEFAULT_FAMILY_NAME,
+    timezone,
+    randomUUID().replaceAll("-", ""),
+    now,
+    now,
+  );
+}
+
+function installFamilyIndexes(db: Database.Database): void {
+  const indexes: Array<[table: string, sql: string]> = [
+    ["workers", "CREATE INDEX IF NOT EXISTS idx_workers_family_active ON workers(family_id, is_active, created_at)"],
+    ["tasks", "CREATE INDEX IF NOT EXISTS idx_tasks_family_status_target ON tasks(family_id, status, target_worker_id, created_at DESC)"],
+    ["task_assignments", "CREATE INDEX IF NOT EXISTS idx_assignments_family_worker_status ON task_assignments(family_id, worker_id, status, updated_at DESC)"],
+    ["task_assignments", "CREATE INDEX IF NOT EXISTS idx_assignments_family_status ON task_assignments(family_id, status, submitted_at)"],
+    ["consumption_activities", "CREATE INDEX IF NOT EXISTS idx_activities_family_active_sort ON consumption_activities(family_id, is_active, sort_order, created_at)"],
+    ["transactions", "CREATE INDEX IF NOT EXISTS idx_transactions_family_worker_created ON transactions(family_id, worker_id, created_at DESC)"],
+    ["reward_requests", "CREATE INDEX IF NOT EXISTS idx_reward_requests_family_status ON reward_requests(family_id, status, created_at ASC)"],
+    ["audit_logs", "CREATE INDEX IF NOT EXISTS idx_audit_logs_family_created ON audit_logs(family_id, created_at DESC)"],
+    ["reward_definitions", "CREATE INDEX IF NOT EXISTS idx_reward_definitions_family_kind_active ON reward_definitions(family_id, kind, is_active, created_at DESC)"],
+    ["reward_grant_batches", "CREATE INDEX IF NOT EXISTS idx_reward_batches_family_worker_created ON reward_grant_batches(family_id, worker_id, created_at DESC)"],
+    ["worker_reward_items", "CREATE INDEX IF NOT EXISTS idx_reward_items_family_worker_status ON worker_reward_items(family_id, worker_id, status, granted_at DESC)"],
+  ];
+  for (const [table, sql] of indexes) {
+    if (tableHasColumn(db, table, "family_id")) db.exec(sql);
+  }
+}
+
+function installImmutableFamilyTrigger(db: Database.Database, table: string): void {
+  if (!tableHasColumn(db, table, "family_id")) return;
+  db.exec(`
+    CREATE TRIGGER IF NOT EXISTS trg_${table}_family_immutable
+    BEFORE UPDATE OF family_id ON ${table}
+    WHEN NEW.family_id <> OLD.family_id
+    BEGIN
+      SELECT RAISE(ABORT, 'FAMILY_IMMUTABLE:${table}');
+    END;
+  `);
+}
+
+function installScopedRelationTrigger(
+  db: Database.Database,
+  childTable: string,
+  childColumn: string,
+  parentTable: string,
+): void {
+  if (
+    !tableHasColumn(db, childTable, "family_id")
+    || !tableHasColumn(db, childTable, childColumn)
+    || !tableHasColumn(db, parentTable, "family_id")
+  ) return;
+  const name = `trg_${childTable}_${childColumn}_family`;
+  const condition = `NEW.${childColumn} IS NOT NULL AND NOT EXISTS (
+    SELECT 1 FROM ${parentTable} parent
+    WHERE parent.id = NEW.${childColumn} AND parent.family_id = NEW.family_id
+  )`;
+  db.exec(`
+    CREATE TRIGGER IF NOT EXISTS ${name}_insert
+    BEFORE INSERT ON ${childTable}
+    WHEN ${condition}
+    BEGIN
+      SELECT RAISE(ABORT, 'FAMILY_MISMATCH:${childTable}.${childColumn}');
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS ${name}_update
+    BEFORE UPDATE OF family_id, ${childColumn} ON ${childTable}
+    WHEN ${condition}
+    BEGIN
+      SELECT RAISE(ABORT, 'FAMILY_MISMATCH:${childTable}.${childColumn}');
+    END;
+  `);
+}
+
+function installDerivedRelationTrigger(
+  db: Database.Database,
+  childTable: string,
+  leftColumn: string,
+  leftTable: string,
+  rightColumn: string,
+  rightTable: string,
+): void {
+  if (
+    !tableHasColumn(db, childTable, leftColumn)
+    || !tableHasColumn(db, childTable, rightColumn)
+    || !tableHasColumn(db, leftTable, "family_id")
+    || !tableHasColumn(db, rightTable, "family_id")
+  ) return;
+  const name = `trg_${childTable}_${leftColumn}_${rightColumn}_family`;
+  const condition = `NEW.${leftColumn} IS NOT NULL AND NEW.${rightColumn} IS NOT NULL AND NOT EXISTS (
+    SELECT 1
+    FROM ${leftTable} family_left
+    JOIN ${rightTable} family_right ON family_right.id = NEW.${rightColumn}
+    WHERE family_left.id = NEW.${leftColumn}
+      AND family_left.family_id = family_right.family_id
+  )`;
+  db.exec(`
+    CREATE TRIGGER IF NOT EXISTS ${name}_insert
+    BEFORE INSERT ON ${childTable}
+    WHEN ${condition}
+    BEGIN
+      SELECT RAISE(ABORT, 'FAMILY_MISMATCH:${childTable}');
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS ${name}_update
+    BEFORE UPDATE OF ${leftColumn}, ${rightColumn} ON ${childTable}
+    WHEN ${condition}
+    BEGIN
+      SELECT RAISE(ABORT, 'FAMILY_MISMATCH:${childTable}');
+    END;
+  `);
+}
+
+function installFamilyTriggers(db: Database.Database): void {
+  for (const table of FAMILY_SCOPED_TABLES) installImmutableFamilyTrigger(db, table);
+  installImmutableFamilyTrigger(db, "app_settings");
+
+  const scopedRelations: Array<[string, string, string]> = [
+    ["tasks", "target_worker_id", "workers"],
+    ["task_assignments", "task_id", "tasks"],
+    ["task_assignments", "worker_id", "workers"],
+    ["task_assignments", "approved_reward_grant_id", "reward_grant_batches"],
+    ["transactions", "worker_id", "workers"],
+    ["transactions", "assignment_id", "task_assignments"],
+    ["transactions", "consumption_activity_id", "consumption_activities"],
+    ["transactions", "reward_item_id", "worker_reward_items"],
+    ["reward_requests", "worker_id", "workers"],
+    ["reward_requests", "approved_transaction_id", "transactions"],
+    ["reward_grant_batches", "worker_id", "workers"],
+    ["worker_reward_items", "worker_id", "workers"],
+    ["worker_reward_items", "grant_batch_id", "reward_grant_batches"],
+    ["worker_reward_items", "definition_id", "reward_definitions"],
+  ];
+  for (const relation of scopedRelations) installScopedRelationTrigger(db, ...relation);
+
+  const derivedRelations: Array<[string, string, string, string, string]> = [
+    ["active_timers", "worker_id", "workers", "assignment_id", "task_assignments"],
+    ["active_timers", "worker_id", "workers", "consumption_activity_id", "consumption_activities"],
+    ["timer_segments", "worker_id", "workers", "assignment_id", "task_assignments"],
+    ["timer_segments", "worker_id", "workers", "consumption_activity_id", "consumption_activities"],
+    ["timer_adjustments", "worker_id", "workers", "assignment_id", "task_assignments"],
+    ["transaction_reversals", "original_transaction_id", "transactions", "reversal_transaction_id", "transactions"],
+    ["daily_grants", "worker_id", "workers", "transaction_id", "transactions"],
+    ["task_reward_bindings", "task_id", "tasks", "definition_id", "reward_definitions"],
+    ["assignment_reward_items", "assignment_id", "task_assignments", "definition_id", "reward_definitions"],
+    ["daily_coupon_grants", "worker_id", "workers", "grant_batch_id", "reward_grant_batches"],
+    ["reward_coupon_uses", "worker_id", "workers", "reward_item_id", "worker_reward_items"],
+    ["reward_coupon_uses", "worker_id", "workers", "transaction_id", "transactions"],
+    ["reward_coupon_uses", "worker_id", "workers", "confirmed_worker_id", "workers"],
+  ];
+  for (const relation of derivedRelations) installDerivedRelationTrigger(db, ...relation);
+}
+
+export function migrateFamilySchema(
+  db: Database.Database,
+  now = Date.now(),
+  timezone = "Asia/Shanghai",
+): void {
+  db.exec(FAMILY_SCHEMA);
+  ensureDefaultFamily(db, now, timezone);
+
+  db.pragma("foreign_keys = OFF");
+  try {
+    db.exec("BEGIN IMMEDIATE");
+    for (const table of FAMILY_SCOPED_TABLES) {
+      if (tableExists(db, table) && !tableHasColumn(db, table, "family_id")) {
+        db.exec(`
+          ALTER TABLE ${table}
+          ADD COLUMN family_id TEXT NOT NULL DEFAULT '${DEFAULT_FAMILY_ID}'
+            REFERENCES families(id) ON DELETE RESTRICT;
+        `);
+      }
+    }
+
+    if (tableExists(db, "app_settings") && !tableHasColumn(db, "app_settings", "family_id")) {
+      db.exec(`
+        CREATE TABLE app_settings_new (
+          family_id TEXT NOT NULL DEFAULT '${DEFAULT_FAMILY_ID}'
+            REFERENCES families(id) ON DELETE RESTRICT,
+          key TEXT NOT NULL,
+          value TEXT NOT NULL,
+          updated_at INTEGER NOT NULL,
+          PRIMARY KEY(family_id, key)
+        );
+        INSERT INTO app_settings_new(family_id, key, value, updated_at)
+        SELECT '${DEFAULT_FAMILY_ID}', key, value, updated_at FROM app_settings;
+        DROP TABLE app_settings;
+        ALTER TABLE app_settings_new RENAME TO app_settings;
+      `);
+    }
+    db.exec("COMMIT");
+  } catch (error) {
+    if (db.inTransaction) db.exec("ROLLBACK");
+    throw error;
+  } finally {
+    db.pragma("foreign_keys = ON");
+  }
+
+  installFamilyIndexes(db);
+  installFamilyTriggers(db);
+  const foreignKeyViolations = db.pragma("foreign_key_check") as unknown[];
+  if (foreignKeyViolations.length > 0) {
+    throw new Error(`家庭数据迁移后发现 ${foreignKeyViolations.length} 条外键异常。`);
+  }
+  db.prepare("INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (9, ?)").run(now);
+}
+
+export function migrateSystemAccountSchema(db: Database.Database, now = Date.now()): void {
+  db.exec(SYSTEM_ACCOUNT_SCHEMA);
+  db.prepare("INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (10, ?)").run(now);
+}
+
+export function migrateBusinessActorSchema(db: Database.Database, now = Date.now()): void {
+  for (const table of ["audit_logs", "transactions"]) {
+    if (!tableExists(db, table)) continue;
+    if (!tableHasColumn(db, table, "actor_type")) {
+      db.exec(`ALTER TABLE ${table} ADD COLUMN actor_type TEXT NOT NULL DEFAULT 'legacy'`);
+    }
+    if (!tableHasColumn(db, table, "actor_id")) {
+      db.exec(`ALTER TABLE ${table} ADD COLUMN actor_id TEXT`);
+    }
+    if (!tableHasColumn(db, table, "actor_name_snapshot")) {
+      db.exec(`ALTER TABLE ${table} ADD COLUMN actor_name_snapshot TEXT`);
+    }
+    if (!tableHasColumn(db, table, "acting_for_worker_id")) {
+      db.exec(`ALTER TABLE ${table} ADD COLUMN acting_for_worker_id TEXT`);
+    }
+    db.exec(`
+      UPDATE ${table}
+      SET
+        actor_type = CASE
+          WHEN actor = 'system' THEN 'system'
+          WHEN actor LIKE 'worker:%' THEN 'worker'
+          WHEN actor = 'admin' THEN 'legacy_admin'
+          ELSE 'legacy'
+        END,
+        actor_id = CASE
+          WHEN actor LIKE 'worker:%' THEN substr(actor, 8)
+          ELSE actor_id
+        END,
+        actor_name_snapshot = CASE
+          WHEN actor = 'system' THEN '系统'
+          WHEN actor = 'admin' THEN '旧版管理员'
+          WHEN actor LIKE 'worker:%' THEN '打工人'
+          ELSE actor_name_snapshot
+        END
+      WHERE actor_type = 'legacy';
+    `);
+  }
+  if (tableExists(db, "audit_logs") && tableHasColumn(db, "audit_logs", "family_id")) {
+    db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_audit_logs_family_actor_created
+      ON audit_logs(family_id, actor_type, actor_id, created_at DESC)
+    `);
+  }
+  db.prepare("INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (11, ?)").run(now);
+}
+
+export function migrateBossFamilyProfileSchema(db: Database.Database, now = Date.now()): void {
+  db.exec(FAMILY_SCHEMA);
+  if (!tableHasColumn(db, "family_bosses", "display_name_override")) {
+    db.exec(`
+      ALTER TABLE family_bosses
+      ADD COLUMN display_name_override TEXT
+        CHECK(display_name_override IS NULL OR length(trim(display_name_override)) BETWEEN 1 AND 60)
+    `);
+  }
+  db.prepare("INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (12, ?)").run(now);
+}
+
 function initializeDatabase(db: Database.Database) {
   db.pragma("foreign_keys = ON");
   db.pragma("busy_timeout = 5000");
   db.exec(SCHEMA);
 
   const now = Date.now();
-  const seed = db.prepare(`
-    INSERT OR IGNORE INTO consumption_activities
-      (id, name, icon, sort_order, is_active, created_at, updated_at)
-    VALUES (?, ?, ?, ?, 1, ?, ?)
-  `);
-  seed.run("consume-game", "玩游戏", "gamepad", 10, now, now);
-  seed.run("consume-video", "看视频", "video", 20, now, now);
+  ensureDefaultFamily(db, now, getConfig().timezone);
   db.prepare("INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (1, ?)").run(now);
   db.prepare("INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (2, ?)").run(now);
   db.prepare("INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (3, ?)").run(now);
@@ -787,10 +1169,21 @@ function initializeDatabase(db: Database.Database) {
   migrateRewardSchema(db, now);
   migrateTaskRewardSchema(db, now);
   migrateRepeatableTaskSchema(db, now);
+  migrateFamilySchema(db, now, getConfig().timezone);
+  migrateSystemAccountSchema(db, now);
+  migrateBusinessActorSchema(db, now);
+  migrateBossFamilyProfileSchema(db, now);
+  const seed = db.prepare(`
+    INSERT OR IGNORE INTO consumption_activities
+      (id, name, icon, sort_order, is_active, created_at, updated_at)
+    VALUES (?, ?, ?, ?, 1, ?, ?)
+  `);
+  seed.run("consume-game", "玩游戏", "gamepad", 10, now, now);
+  seed.run("consume-video", "看视频", "video", 20, now, now);
   db.prepare(`
-    INSERT OR IGNORE INTO app_settings(key, value, updated_at)
-    VALUES ('reward_system_enabled', '1', ?)
-  `).run(now);
+    INSERT OR IGNORE INTO app_settings(family_id, key, value, updated_at)
+    VALUES (?, 'reward_system_enabled', '1', ?)
+  `).run(DEFAULT_FAMILY_ID, now);
   db.prepare(`
     INSERT OR IGNORE INTO worker_daily_coupon_settings(
       worker_id, is_enabled, daily_quantity, random_min_seconds, random_max_seconds, updated_at
@@ -823,8 +1216,37 @@ export function closeDbForTests(): void {
   globalThis.__penWorkerSchemaVersion = undefined;
 }
 
+export type FamilyRow = {
+  id: string;
+  name: string;
+  timezone: string;
+  status: "active" | "inactive";
+  entry_code: string;
+  created_at: number;
+  updated_at: number;
+};
+
+export type BossAccountRow = {
+  id: string;
+  username: string;
+  display_name: string;
+  password_hash: string;
+  auth_version: number;
+  is_active: number;
+  created_at: number;
+  updated_at: number;
+};
+
+export type FamilyBossRow = {
+  family_id: string;
+  boss_id: string;
+  display_name_override: string | null;
+  created_at: number;
+};
+
 export type WorkerRow = {
   id: string;
+  family_id: string;
   name: string;
   avatar: string;
   theme: string;
@@ -847,6 +1269,7 @@ export type WorkerAvatarImageRow = {
 
 export type RewardRequestRow = {
   id: string;
+  family_id: string;
   worker_id: string;
   title: string;
   description: string;
@@ -862,6 +1285,7 @@ export type RewardRequestRow = {
 
 export type TaskRow = {
   id: string;
+  family_id: string;
   title: string;
   description: string;
   reward_seconds: number;
@@ -881,6 +1305,7 @@ export type TaskRow = {
 
 export type AssignmentRow = {
   id: string;
+  family_id: string;
   task_id: string;
   worker_id: string;
   title_snapshot: string;
@@ -924,6 +1349,7 @@ export type RewardItemStatus = "available" | "redeemed" | "fulfilled" | "cancell
 
 export type RewardDefinitionRow = {
   id: string;
+  family_id: string;
   name: string;
   description: string;
   icon: string;
@@ -977,6 +1403,7 @@ export type DailyCouponGrantRow = {
 
 export type WorkerRewardItemRow = {
   id: string;
+  family_id: string;
   worker_id: string;
   grant_batch_id: string;
   definition_id: string | null;

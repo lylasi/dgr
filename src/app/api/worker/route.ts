@@ -1,6 +1,7 @@
 import type { NextRequest } from "next/server";
 import { z } from "zod";
 import { AppError, jsonError, jsonOk } from "@/lib/http";
+import { businessContextFromSession } from "@/lib/business-session";
 import {
   cancelAssignment,
   cancelConsumptionTimer,
@@ -15,7 +16,6 @@ import {
   submitRewardRequest,
   submitAssignment,
   syncWorker,
-  workerAuthorizationValid,
 } from "@/lib/service";
 import { assertLoginAllowed, clearLoginFailures, recordLoginFailure } from "@/lib/rate-limit";
 import { confirmPhysicalReward, redeemTimeReward } from "@/lib/reward-service";
@@ -77,14 +77,15 @@ const mutationSchema = z.discriminatedUnion("action", [
 
 function requireWorker(request: NextRequest) {
   const session = getRequestSession(request);
-  if (session.active?.type !== "worker") {
+  if (session.active?.type !== "worker" && session.active?.type !== "boss_as_worker") {
     throw new AppError("请先登录打工人角色。", 401, "WORKER_LOGIN_REQUIRED");
   }
   const workerId = session.active.workerId;
-  if (!workerAuthorizationValid(workerId, session.workers[workerId] || -1)) {
+  const context = businessContextFromSession(session);
+  if (!context) {
     throw new AppError("登录已失效，请重新输入密码。", 401, "WORKER_LOGIN_REQUIRED");
   }
-  return workerId;
+  return { context, workerId };
 }
 
 function credentialAttemptKey(request: NextRequest, workerId: string) {
@@ -94,8 +95,8 @@ function credentialAttemptKey(request: NextRequest, workerId: string) {
 
 export async function GET(request: NextRequest) {
   try {
-    const workerId = requireWorker(request);
-    return jsonOk(getWorkerState(workerId));
+    const { context, workerId } = requireWorker(request);
+    return jsonOk(getWorkerState(context, workerId));
   } catch (error) {
     return jsonError(error);
   }
@@ -103,75 +104,71 @@ export async function GET(request: NextRequest) {
 
 export async function POST(request: NextRequest) {
   try {
-    const workerId = requireWorker(request);
+    const { context, workerId } = requireWorker(request);
     const input = mutationSchema.parse(await request.json());
-    const actor = `worker:${workerId}` as const;
 
     switch (input.action) {
       case "claim_task":
-        claimTask(workerId, input.taskId, input.requestId);
+        claimTask(context, workerId, input.taskId, input.requestId);
         break;
       case "start_task_timer":
-        startTimer({
+        startTimer(context, {
           workerId,
           timerType: "reward_task",
           targetId: input.assignmentId,
-          actor,
           requestId: input.requestId,
         });
         break;
       case "start_consumption":
-        startTimer({
+        startTimer(context, {
           workerId,
           timerType: "consumption",
           targetId: input.activityId,
-          actor,
           requestId: input.requestId,
         });
         break;
       case "stop_timer":
-        stopTimer(workerId, actor, input.requestId);
+        stopTimer(context, workerId, input.requestId);
         break;
       case "cancel_consumption_timer":
-        cancelConsumptionTimer({ workerId, actor, requestId: input.requestId });
+        cancelConsumptionTimer(context, { workerId, requestId: input.requestId });
         break;
       case "set_assignment_duration":
-        setAssignmentDuration({ ...input, actor });
+        setAssignmentDuration(context, input);
         break;
       case "cancel_assignment":
-        cancelAssignment({ ...input, actor });
+        cancelAssignment(context, input);
         break;
       case "manual_consumption":
-        manualConsumption({ ...input, workerId, actor });
+        manualConsumption(context, { ...input, workerId });
         break;
       case "submit_task":
-        submitAssignment({
+        submitAssignment(context, {
           workerId,
           assignmentId: input.assignmentId,
           note: input.note,
-          actor,
           requestId: input.requestId,
         });
         break;
       case "submit_reward_request":
-        submitRewardRequest({ ...input, workerId });
+        submitRewardRequest(context, { ...input, workerId });
         break;
       case "resubmit_reward_request":
-        resubmitRewardRequest({ ...input, workerId });
+        resubmitRewardRequest(context, { ...input, workerId });
         break;
       case "cancel_reward_request":
-        cancelRewardRequest({ ...input, workerId });
+        cancelRewardRequest(context, { ...input, workerId });
         break;
       case "redeem_reward_item":
-        syncWorker(workerId);
-        redeemTimeReward({ ...input, workerId });
+        syncWorker(context, workerId);
+        redeemTimeReward(context, { ...input, workerId });
         break;
       case "confirm_physical_reward": {
         const key = credentialAttemptKey(request, workerId);
         assertLoginAllowed(key);
         try {
-          syncWorker(workerId);
-          await confirmPhysicalReward({ ...input, workerId });
+          syncWorker(context, workerId);
+          await confirmPhysicalReward(context, { ...input, workerId });
           clearLoginFailures(key);
         } catch (error) {
           if (error instanceof AppError && error.code === "INVALID_PASSWORD") recordLoginFailure(key);
@@ -180,7 +177,7 @@ export async function POST(request: NextRequest) {
         break;
       }
     }
-    return jsonOk(getWorkerState(workerId));
+    return jsonOk(getWorkerState(context, workerId));
   } catch (error) {
     return jsonError(error);
   }

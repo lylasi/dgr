@@ -1,5 +1,12 @@
 import { randomUUID } from "node:crypto";
 import type Database from "better-sqlite3";
+import {
+  actorAuditFields,
+  actorCanOperateWorker,
+  isFamilyManager,
+  systemBusinessContext,
+  type FamilyBusinessContext,
+} from "@/lib/business-context";
 import { getConfig } from "@/lib/config";
 import {
   getDb,
@@ -26,10 +33,10 @@ import {
 import { dateKey, elapsedSeconds } from "@/lib/time";
 
 type Db = Database.Database;
-type Actor = "admin" | `worker:${string}` | "system";
 
 type ConsumptionRow = {
   id: string;
+  family_id: string;
   name: string;
   icon: string;
   sort_order: number;
@@ -40,6 +47,7 @@ type ConsumptionRow = {
 
 type TransactionRow = {
   id: string;
+  family_id: string;
   worker_id: string;
   type: "daily_reward" | "task_reward" | "consumption" | "admin_adjustment" | "coupon_reward";
   title: string;
@@ -48,7 +56,11 @@ type TransactionRow = {
   assignment_id: string | null;
   consumption_activity_id: string | null;
   reward_item_id: string | null;
-  actor: Actor;
+  actor: string;
+  actor_type: string;
+  actor_id: string | null;
+  actor_name_snapshot: string | null;
+  acting_for_worker_id: string | null;
   reason: string | null;
   request_id: string | null;
   started_at: number | null;
@@ -66,42 +78,57 @@ function requestId(value?: string) {
   return value?.trim() || uniqueId();
 }
 
-function actorForWorker(workerId: string): Actor {
-  return `worker:${workerId}`;
+function requireFamilyManager(context: FamilyBusinessContext) {
+  if (!isFamilyManager(context)) {
+    throw new AppError("只有当前家庭的老板可以执行这项操作。", 403, "FAMILY_MANAGER_REQUIRED");
+  }
 }
 
-function assertActorCanManageWorker(actor: Actor, workerId: string) {
-  if (actor !== "admin" && actor !== actorForWorker(workerId)) {
+function assertActorCanManageWorker(
+  context: FamilyBusinessContext,
+  workerId: string,
+  allowFamilyManager = true,
+) {
+  if (!actorCanOperateWorker(context, workerId, allowFamilyManager)) {
     throw new AppError("不能操作别人的记录。", 403, "FORBIDDEN");
   }
 }
 
-function getWorkerRow(db: Db, workerId: string, includeInactive = false): WorkerRow {
-  const worker = db.prepare("SELECT * FROM workers WHERE id = ?").get(workerId) as WorkerRow | undefined;
+function getWorkerRow(
+  db: Db,
+  familyId: string,
+  workerId: string,
+  includeInactive = false,
+): WorkerRow {
+  const worker = db
+    .prepare("SELECT * FROM workers WHERE id = ? AND family_id = ?")
+    .get(workerId, familyId) as WorkerRow | undefined;
   if (!worker || (!includeInactive && !worker.is_active)) {
     throw new AppError("没有找到这个打工人。", 404, "WORKER_NOT_FOUND");
   }
   return worker;
 }
 
-function getAssignmentRow(db: Db, assignmentId: string): AssignmentRow {
+function getAssignmentRow(db: Db, familyId: string, assignmentId: string): AssignmentRow {
   const assignment = db
-    .prepare("SELECT * FROM task_assignments WHERE id = ?")
-    .get(assignmentId) as AssignmentRow | undefined;
+    .prepare("SELECT * FROM task_assignments WHERE id = ? AND family_id = ?")
+    .get(assignmentId, familyId) as AssignmentRow | undefined;
   if (!assignment) throw new AppError("没有找到这个任务记录。", 404, "ASSIGNMENT_NOT_FOUND");
   return assignment;
 }
 
-function getTaskRow(db: Db, taskId: string): TaskRow {
-  const task = db.prepare("SELECT * FROM tasks WHERE id = ?").get(taskId) as TaskRow | undefined;
+function getTaskRow(db: Db, familyId: string, taskId: string): TaskRow {
+  const task = db
+    .prepare("SELECT * FROM tasks WHERE id = ? AND family_id = ?")
+    .get(taskId, familyId) as TaskRow | undefined;
   if (!task) throw new AppError("没有找到这个任务。", 404, "TASK_NOT_FOUND");
   return task;
 }
 
-function getRewardRequestRow(db: Db, rewardRequestId: string): RewardRequestRow {
+function getRewardRequestRow(db: Db, familyId: string, rewardRequestId: string): RewardRequestRow {
   const rewardRequest = db
-    .prepare("SELECT * FROM reward_requests WHERE id = ?")
-    .get(rewardRequestId) as RewardRequestRow | undefined;
+    .prepare("SELECT * FROM reward_requests WHERE id = ? AND family_id = ?")
+    .get(rewardRequestId, familyId) as RewardRequestRow | undefined;
   if (!rewardRequest) {
     throw new AppError("没有找到这条奖励申报。", 404, "REWARD_REQUEST_NOT_FOUND");
   }
@@ -110,21 +137,29 @@ function getRewardRequestRow(db: Db, rewardRequestId: string): RewardRequestRow 
 
 function audit(
   db: Db,
-  actor: Actor,
+  context: FamilyBusinessContext,
   action: string,
   targetType: string,
   targetId: string | null,
   detail: string | null,
   mutationId?: string,
 ) {
+  const actor = actorAuditFields(context.actor);
   db.prepare(`
-    INSERT INTO audit_logs(id, actor, action, target_type, target_id, detail, request_id, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(uniqueId(), actor, action, targetType, targetId, detail, mutationId || null, Date.now());
+    INSERT INTO audit_logs(
+      id, family_id, actor, actor_type, actor_id, actor_name_snapshot,
+      acting_for_worker_id, action, target_type, target_id, detail, request_id, created_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    uniqueId(), context.familyId, actor.key, actor.type, actor.id, actor.name,
+    actor.actingForWorkerId, action, targetType, targetId, detail,
+    mutationId || null, Date.now(),
+  );
 }
 
 function insertTransaction(
   db: Db,
+  context: FamilyBusinessContext,
   values: {
     id?: string;
     workerId: string;
@@ -134,7 +169,6 @@ function insertTransaction(
     balanceAfter: number;
     assignmentId?: string | null;
     consumptionActivityId?: string | null;
-    actor: Actor;
     reason?: string | null;
     requestId?: string | null;
     startedAt?: number | null;
@@ -143,14 +177,17 @@ function insertTransaction(
   },
 ) {
   const id = values.id || uniqueId();
+  const actor = actorAuditFields(context.actor);
   db.prepare(`
     INSERT INTO transactions(
-      id, worker_id, type, title, amount_seconds, balance_after_seconds,
-      assignment_id, consumption_activity_id, actor, reason, request_id,
-      started_at, ended_at, created_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      id, family_id, worker_id, type, title, amount_seconds, balance_after_seconds,
+      assignment_id, consumption_activity_id, actor,
+      actor_type, actor_id, actor_name_snapshot, acting_for_worker_id,
+      reason, request_id, started_at, ended_at, created_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     id,
+    context.familyId,
     values.workerId,
     values.type,
     values.title,
@@ -158,7 +195,11 @@ function insertTransaction(
     values.balanceAfter,
     values.assignmentId || null,
     values.consumptionActivityId || null,
-    values.actor,
+    actor.key,
+    actor.type,
+    actor.id,
+    actor.name,
+    actor.actingForWorkerId,
     values.reason || null,
     values.requestId || null,
     values.startedAt || null,
@@ -168,27 +209,28 @@ function insertTransaction(
   return id;
 }
 
-function timerTitle(db: Db, timer: ActiveTimerRow): string {
+function timerTitle(db: Db, familyId: string, timer: ActiveTimerRow): string {
   if (timer.timer_type === "reward_task") {
     const row = db
-      .prepare("SELECT title_snapshot FROM task_assignments WHERE id = ?")
-      .get(timer.assignment_id) as { title_snapshot: string } | undefined;
+      .prepare("SELECT title_snapshot FROM task_assignments WHERE id = ? AND family_id = ?")
+      .get(timer.assignment_id, familyId) as { title_snapshot: string } | undefined;
     return row?.title_snapshot || "奖励任务";
   }
   const row = db
-    .prepare("SELECT name FROM consumption_activities WHERE id = ?")
-    .get(timer.consumption_activity_id) as { name: string } | undefined;
+    .prepare("SELECT name FROM consumption_activities WHERE id = ? AND family_id = ?")
+    .get(timer.consumption_activity_id, familyId) as { name: string } | undefined;
   return row?.name || "消耗任务";
 }
 
 function stopTimerWithin(
   db: Db,
+  context: FamilyBusinessContext,
   timer: ActiveTimerRow,
-  actor: Actor,
   endedAt: number,
   mutationId: string,
 ) {
-  const worker = getWorkerRow(db, timer.worker_id, true);
+  const worker = getWorkerRow(db, context.familyId, timer.worker_id, true);
+  const actor = actorAuditFields(context.actor);
   const elapsed = elapsedSeconds(timer.started_at, endedAt);
   let duration = elapsed;
   let actualEnd = endedAt;
@@ -216,7 +258,7 @@ function stopTimerWithin(
     actualEnd,
     duration,
     timer.started_by,
-    actor,
+    actor.key,
     mutationId,
     endedAt,
   );
@@ -234,14 +276,13 @@ function stopTimerWithin(
     const nextBalance = worker.balance_seconds - duration;
     db.prepare("UPDATE workers SET balance_seconds = ?, updated_at = ? WHERE id = ?")
       .run(nextBalance, endedAt, worker.id);
-    transactionId = insertTransaction(db, {
+    transactionId = insertTransaction(db, context, {
       workerId: worker.id,
       type: "consumption",
-      title: timerTitle(db, timer),
+      title: timerTitle(db, context.familyId, timer),
       amountSeconds: -duration,
       balanceAfter: nextBalance,
       consumptionActivityId: timer.consumption_activity_id,
-      actor,
       requestId: mutationId,
       startedAt: timer.started_at,
       endedAt: actualEnd,
@@ -252,22 +293,23 @@ function stopTimerWithin(
   return { durationSeconds: duration, endedAt: actualEnd, transactionId };
 }
 
-function reconcileExpiredConsumption(db: Db, workerId: string, now: number) {
+function reconcileExpiredConsumption(db: Db, familyId: string, workerId: string, now: number) {
   const timer = db
     .prepare("SELECT * FROM active_timers WHERE worker_id = ?")
     .get(workerId) as ActiveTimerRow | undefined;
   if (!timer || timer.timer_type !== "consumption") return false;
-  const worker = getWorkerRow(db, workerId, true);
+  const worker = getWorkerRow(db, familyId, workerId, true);
   if (elapsedSeconds(timer.started_at, now) < worker.balance_seconds && worker.balance_seconds > 0) {
     return false;
   }
-  stopTimerWithin(db, timer, "system", now, `auto-end:${timer.request_id}`);
-  audit(db, "system", "timer_auto_stopped", "worker", workerId, "余额已用完，自动结束消耗计时");
+  const systemContext = systemBusinessContext(familyId);
+  stopTimerWithin(db, systemContext, timer, now, `auto-end:${timer.request_id}`);
+  audit(db, systemContext, "timer_auto_stopped", "worker", workerId, "余额已用完，自动结束消耗计时");
   return true;
 }
 
-function grantDailyReward(db: Db, workerId: string, now: number) {
-  const worker = getWorkerRow(db, workerId);
+function grantDailyReward(db: Db, familyId: string, workerId: string, now: number) {
+  const worker = getWorkerRow(db, familyId, workerId);
   const rewardDate = dateKey(now, worker.timezone);
   const existing = db
     .prepare("SELECT id FROM daily_grants WHERE worker_id = ? AND reward_date = ?")
@@ -280,13 +322,12 @@ function grantDailyReward(db: Db, workerId: string, now: number) {
     const nextBalance = worker.balance_seconds + worker.daily_reward_seconds;
     db.prepare("UPDATE workers SET balance_seconds = ?, updated_at = ? WHERE id = ?")
       .run(nextBalance, now, workerId);
-    transactionId = insertTransaction(db, {
+    transactionId = insertTransaction(db, systemBusinessContext(familyId), {
       workerId,
       type: "daily_reward",
       title: "每日固定奖励",
       amountSeconds: worker.daily_reward_seconds,
       balanceAfter: nextBalance,
-      actor: "system",
       requestId: `daily:${workerId}:${rewardDate}`,
       createdAt: now,
     });
@@ -299,15 +340,20 @@ function grantDailyReward(db: Db, workerId: string, now: number) {
   return true;
 }
 
-function syncWorkerWithin(db: Db, workerId: string, now = Date.now()) {
-  reconcileExpiredConsumption(db, workerId, now);
-  grantDailyReward(db, workerId, now);
-  grantDailyCouponsWithin(db, workerId, now);
+function syncWorkerWithin(db: Db, familyId: string, workerId: string, now = Date.now()) {
+  reconcileExpiredConsumption(db, familyId, workerId, now);
+  grantDailyReward(db, familyId, workerId, now);
+  grantDailyCouponsWithin(db, familyId, workerId, now);
 }
 
-export function syncWorker(workerId: string, now = Date.now()) {
+export function syncWorker(
+  context: FamilyBusinessContext,
+  workerId: string,
+  now = Date.now(),
+) {
   const db = getDb();
-  return db.transaction(() => syncWorkerWithin(db, workerId, now)).immediate();
+  getWorkerRow(db, context.familyId, workerId);
+  return db.transaction(() => syncWorkerWithin(db, context.familyId, workerId, now)).immediate();
 }
 
 function workerAvatarUrl(db: Db, workerId: string): string | null {
@@ -320,6 +366,7 @@ function workerAvatarUrl(db: Db, workerId: string): string | null {
 function publicWorker(db: Db, worker: WorkerRow) {
   return {
     id: worker.id,
+    familyId: worker.family_id,
     name: worker.name,
     avatar: worker.avatar,
     theme: worker.theme,
@@ -401,8 +448,8 @@ function concealedAssignmentRewardItems(items: ReturnType<typeof getPublicAssign
   });
 }
 
-function publicTask(db: Db, task: TaskRow, concealUncertainRewards = false) {
-  const rewardBindings = getPublicTaskRewardBindings(db, task.id);
+function publicTask(db: Db, familyId: string, task: TaskRow, concealUncertainRewards = false) {
+  const rewardBindings = getPublicTaskRewardBindings(db, familyId, task.id);
   return {
     id: task.id,
     title: task.title,
@@ -436,8 +483,8 @@ function assignmentDuration(db: Db, assignmentId: string): number {
   return row.total;
 }
 
-function publicAssignment(db: Db, assignment: AssignmentRow, concealUncertainRewards = false) {
-  const rewardItems = getPublicAssignmentRewardItems(db, assignment.id);
+function publicAssignment(db: Db, familyId: string, assignment: AssignmentRow, concealUncertainRewards = false) {
+  const rewardItems = getPublicAssignmentRewardItems(db, familyId, assignment.id);
   return {
     id: assignment.id,
     taskId: assignment.task_id,
@@ -464,7 +511,7 @@ function publicAssignment(db: Db, assignment: AssignmentRow, concealUncertainRew
   };
 }
 
-function publicTimer(db: Db, timer: ActiveTimerRow | undefined) {
+function publicTimer(db: Db, familyId: string, timer: ActiveTimerRow | undefined) {
   if (!timer) return null;
   return {
     workerId: timer.worker_id,
@@ -473,7 +520,7 @@ function publicTimer(db: Db, timer: ActiveTimerRow | undefined) {
     consumptionActivityId: timer.consumption_activity_id,
     startedAt: timer.started_at,
     startedBy: timer.started_by,
-    title: timerTitle(db, timer),
+    title: timerTitle(db, familyId, timer),
   };
 }
 
@@ -513,6 +560,10 @@ function publicTransaction(row: TransactionRow, workerName?: string) {
     amountSeconds: row.amount_seconds,
     balanceAfterSeconds: row.balance_after_seconds,
     actor: row.actor,
+    actorType: row.actor_type,
+    actorId: row.actor_id,
+    actorName: row.actor_name_snapshot,
+    actingForWorkerId: row.acting_for_worker_id,
     reason: row.reason,
     rewardItemId: row.reward_item_id,
     assignmentId: row.assignment_id,
@@ -524,12 +575,19 @@ function publicTransaction(row: TransactionRow, workerName?: string) {
   };
 }
 
-export function listPublicWorkers() {
+export function listPublicWorkers(familyId: string) {
   const db = getDb();
   return (db
-    .prepare("SELECT * FROM workers WHERE is_active = 1 ORDER BY created_at")
-    .all() as WorkerRow[]).map((worker) => ({
+    .prepare(`
+      SELECT worker.*
+      FROM workers worker
+      JOIN families family ON family.id = worker.family_id
+      WHERE worker.family_id = ? AND worker.is_active = 1 AND family.status = 'active'
+      ORDER BY worker.created_at
+    `)
+    .all(familyId) as WorkerRow[]).map((worker) => ({
     id: worker.id,
+    familyId: worker.family_id,
     name: worker.name,
     avatar: worker.avatar,
     theme: worker.theme,
@@ -551,11 +609,12 @@ function avatarMime(data: Buffer): WorkerAvatarImageRow["mime_type"] | null {
   return null;
 }
 
-export function setWorkerAvatarImage(input: {
+export function setWorkerAvatarImage(context: FamilyBusinessContext, input: {
   workerId: string;
   imageDataUrl: string;
   requestId?: string;
 }) {
+  requireFamilyManager(context);
   const db = getDb();
   const mutationId = requestId(input.requestId);
   const now = Date.now();
@@ -569,7 +628,7 @@ export function setWorkerAvatarImage(input: {
   }
 
   db.transaction(() => {
-    getWorkerRow(db, input.workerId, true);
+    getWorkerRow(db, context.familyId, input.workerId, true);
     db.prepare(`
       INSERT INTO worker_avatar_images(worker_id, mime_type, image_data, updated_at)
       VALUES (?, ?, ?, ?)
@@ -579,50 +638,100 @@ export function setWorkerAvatarImage(input: {
         updated_at = excluded.updated_at
     `).run(input.workerId, mimeType, imageData, now);
     db.prepare("UPDATE workers SET updated_at = ? WHERE id = ?").run(now, input.workerId);
-    audit(db, "admin", "worker_avatar_updated", "worker", input.workerId, `更新头像：${mimeType}，${imageData.length} 字节`, mutationId);
+    audit(db, context, "worker_avatar_updated", "worker", input.workerId, `更新头像：${mimeType}，${imageData.length} 字节`, mutationId);
   })();
   return workerAvatarUrl(db, input.workerId);
 }
 
-export function removeWorkerAvatarImage(workerId: string, mutationId?: string) {
+export function removeWorkerAvatarImage(
+  context: FamilyBusinessContext,
+  workerId: string,
+  mutationId?: string,
+) {
+  requireFamilyManager(context);
   const db = getDb();
   const id = requestId(mutationId);
   const now = Date.now();
   db.transaction(() => {
-    getWorkerRow(db, workerId, true);
+    getWorkerRow(db, context.familyId, workerId, true);
     db.prepare("DELETE FROM worker_avatar_images WHERE worker_id = ?").run(workerId);
     db.prepare("UPDATE workers SET updated_at = ? WHERE id = ?").run(now, workerId);
-    audit(db, "admin", "worker_avatar_removed", "worker", workerId, "恢复为系统图标头像", id);
+    audit(db, context, "worker_avatar_removed", "worker", workerId, "恢复为系统图标头像", id);
   })();
 }
 
-export function getWorkerAvatarImage(workerId: string): WorkerAvatarImageRow | null {
+export function getWorkerAvatarImage(
+  context: FamilyBusinessContext,
+  workerId: string,
+): WorkerAvatarImageRow | null {
   const row = getDb()
-    .prepare("SELECT * FROM worker_avatar_images WHERE worker_id = ?")
-    .get(workerId) as WorkerAvatarImageRow | undefined;
+    .prepare(`
+      SELECT image.*
+      FROM worker_avatar_images image
+      JOIN workers worker ON worker.id = image.worker_id
+      WHERE image.worker_id = ? AND worker.family_id = ?
+    `)
+    .get(workerId, context.familyId) as WorkerAvatarImageRow | undefined;
   return row || null;
 }
 
 export function getWorkerAuth(workerId: string) {
-  const worker = getWorkerRow(getDb(), workerId);
-  return { id: worker.id, passwordHash: worker.password_hash, authVersion: worker.auth_version };
+  const worker = getDb().prepare(`
+    SELECT worker.* FROM workers worker
+    WHERE worker.id = ? AND worker.is_active = 1
+  `).get(workerId) as WorkerRow | undefined;
+  if (!worker) throw new AppError("没有找到这个打工人。", 404, "WORKER_NOT_FOUND");
+  return {
+    id: worker.id,
+    familyId: worker.family_id,
+    displayName: worker.name,
+    passwordHash: worker.password_hash,
+    authVersion: worker.auth_version,
+  };
 }
 
 export async function authenticateWorker(workerId: string, password: string) {
   const auth = getWorkerAuth(workerId);
   const valid = await verifyPassword(password, auth.passwordHash);
   if (!valid) throw new AppError("密码不正确，请再试一次。", 401, "INVALID_PASSWORD");
+  if (!workerAuthorizationValid(auth.id, auth.authVersion, auth.familyId)) {
+    throw new AppError("这个家庭当前已经停用。", 403, "FAMILY_DISABLED");
+  }
   return auth;
 }
 
-export function workerAuthorizationValid(workerId: string, authVersion: number) {
+export function workerAuthorizationValid(workerId: string, authVersion: number, familyId?: string) {
   const row = getDb()
-    .prepare("SELECT auth_version, is_active FROM workers WHERE id = ?")
-    .get(workerId) as { auth_version: number; is_active: number } | undefined;
-  return Boolean(row?.is_active && row.auth_version === authVersion);
+    .prepare(`
+      SELECT worker.auth_version, worker.is_active, worker.family_id, family.status AS family_status
+      FROM workers worker
+      JOIN families family ON family.id = worker.family_id
+      WHERE worker.id = ?
+    `)
+    .get(workerId) as {
+      auth_version: number;
+      is_active: number;
+      family_id: string;
+      family_status: "active" | "inactive";
+    } | undefined;
+  return Boolean(
+    row?.is_active
+    && row.family_status === "active"
+    && row.auth_version === authVersion
+    && (familyId === undefined || row.family_id === familyId),
+  );
 }
 
-export async function createWorker(input: {
+export function workerBelongsToFamily(workerId: string, familyId: string): boolean {
+  return Boolean(getDb().prepare(`
+    SELECT 1 FROM workers worker
+    JOIN families family ON family.id = worker.family_id
+    WHERE worker.id = ? AND worker.family_id = ?
+      AND worker.is_active = 1 AND family.status = 'active'
+  `).get(workerId, familyId));
+}
+
+export async function createWorker(context: FamilyBusinessContext, input: {
   name: string;
   password: string;
   avatar: string;
@@ -630,26 +739,32 @@ export async function createWorker(input: {
   dailyRewardSeconds: number;
   requestId?: string;
 }) {
+  requireFamilyManager(context);
   const db = getDb();
   const id = uniqueId();
   const now = Date.now();
   const passwordHash = await hashPassword(input.password);
   const mutationId = requestId(input.requestId);
+  const family = db
+    .prepare("SELECT timezone FROM families WHERE id = ? AND status = 'active'")
+    .get(context.familyId) as { timezone: string } | undefined;
+  if (!family) throw new AppError("没有找到可用的家庭。", 404, "FAMILY_NOT_FOUND");
 
   db.transaction(() => {
     db.prepare(`
       INSERT INTO workers(
-        id, name, avatar, theme, password_hash, balance_seconds,
+        id, family_id, name, avatar, theme, password_hash, balance_seconds,
         daily_reward_seconds, timezone, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?)
     `).run(
       id,
+      context.familyId,
       input.name.trim(),
       input.avatar,
       input.theme,
       passwordHash,
       input.dailyRewardSeconds,
-      getConfig().timezone,
+      family.timezone || getConfig().timezone,
       now,
       now,
     );
@@ -658,12 +773,12 @@ export async function createWorker(input: {
         worker_id, is_enabled, daily_quantity, random_min_seconds, random_max_seconds, updated_at
       ) VALUES (?, 0, 0, 300, 900, ?)
     `).run(id, now);
-    audit(db, "admin", "worker_created", "worker", id, `创建打工人：${input.name.trim()}`, mutationId);
+    audit(db, context, "worker_created", "worker", id, `创建打工人：${input.name.trim()}`, mutationId);
   })();
   return id;
 }
 
-export async function updateWorker(input: {
+export async function updateWorker(context: FamilyBusinessContext, input: {
   workerId: string;
   name?: string;
   avatar?: string;
@@ -673,8 +788,9 @@ export async function updateWorker(input: {
   isActive?: boolean;
   requestId?: string;
 }) {
+  requireFamilyManager(context);
   const db = getDb();
-  const worker = getWorkerRow(db, input.workerId, true);
+  const worker = getWorkerRow(db, context.familyId, input.workerId, true);
   const passwordHash = input.password ? await hashPassword(input.password) : null;
   const mutationId = requestId(input.requestId);
   const activeTimer = db.prepare("SELECT worker_id FROM active_timers WHERE worker_id = ?").get(input.workerId);
@@ -683,6 +799,8 @@ export async function updateWorker(input: {
   }
 
   db.transaction(() => {
+    const nextActive = input.isActive === undefined ? worker.is_active : input.isActive ? 1 : 0;
+    const invalidateSessions = Boolean(passwordHash) || nextActive !== worker.is_active;
     db.prepare(`
       UPDATE workers SET
         name = ?, avatar = ?, theme = ?, daily_reward_seconds = ?,
@@ -694,17 +812,23 @@ export async function updateWorker(input: {
       input.theme || worker.theme,
       input.dailyRewardSeconds ?? worker.daily_reward_seconds,
       passwordHash || worker.password_hash,
-      passwordHash ? worker.auth_version + 1 : worker.auth_version,
-      input.isActive === undefined ? worker.is_active : input.isActive ? 1 : 0,
+      invalidateSessions ? worker.auth_version + 1 : worker.auth_version,
+      nextActive,
       Date.now(),
       worker.id,
     );
-    audit(db, "admin", "worker_updated", "worker", worker.id, "更新打工人资料", mutationId);
+    audit(db, context, "worker_updated", "worker", worker.id, "更新打工人资料", mutationId);
   })();
 }
 
-function createAssignmentWithin(db: Db, task: TaskRow, workerId: string, assignedBy: Actor) {
-  getWorkerRow(db, workerId);
+function createAssignmentWithin(
+  db: Db,
+  context: FamilyBusinessContext,
+  task: TaskRow,
+  workerId: string,
+) {
+  getWorkerRow(db, context.familyId, workerId);
+  const assignedBy = actorAuditFields(context.actor).key;
   const now = Date.now();
   if (task.status !== "published") throw new AppError("这个任务已经关闭。", 409, "TASK_CLOSED");
   if (task.target_worker_id && task.target_worker_id !== workerId) {
@@ -757,7 +881,7 @@ function createAssignmentWithin(db: Db, task: TaskRow, workerId: string, assigne
       task.minimum_duration_seconds, task.bonus_enabled, task.excellent_multiplier_bps,
       task.bonus_criteria, task.due_at, assignedBy, now, now, cancelledAssignment.id,
     );
-    snapshotAssignmentRewardsWithin(db, cancelledAssignment.id, task.id, now);
+    snapshotAssignmentRewardsWithin(db, context.familyId, cancelledAssignment.id, task.id, now);
     return cancelledAssignment.id;
   }
   const participationNumber = (previousAssignments[0]?.participation_number || 0) + 1;
@@ -766,13 +890,14 @@ function createAssignmentWithin(db: Db, task: TaskRow, workerId: string, assigne
   try {
     db.prepare(`
       INSERT INTO task_assignments(
-        id, task_id, worker_id, title_snapshot, description_snapshot,
+        id, family_id, task_id, worker_id, title_snapshot, description_snapshot,
         reward_seconds, timing_mode, minimum_duration_seconds, bonus_enabled,
         excellent_multiplier_bps, bonus_criteria, due_at, assigned_by, participation_number,
         claimed_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       id,
+      context.familyId,
       task.id,
       workerId,
       task.title,
@@ -795,11 +920,11 @@ function createAssignmentWithin(db: Db, task: TaskRow, workerId: string, assigne
     }
     throw error;
   }
-  snapshotAssignmentRewardsWithin(db, id, task.id, now);
+  snapshotAssignmentRewardsWithin(db, context.familyId, id, task.id, now);
   return id;
 }
 
-export function createTask(input: {
+export function createTask(context: FamilyBusinessContext, input: {
   title: string;
   description: string;
   rewardSeconds: number;
@@ -815,6 +940,7 @@ export function createTask(input: {
   assignNow?: boolean;
   requestId?: string;
 }) {
+  requireFamilyManager(context);
   const db = getDb();
   const id = uniqueId();
   const now = Date.now();
@@ -825,19 +951,20 @@ export function createTask(input: {
   }
   return db.transaction(() => {
     const previous = db
-      .prepare("SELECT target_id FROM audit_logs WHERE request_id = ?")
-      .get(mutationId) as { target_id: string | null } | undefined;
+      .prepare("SELECT target_id FROM audit_logs WHERE family_id = ? AND request_id = ?")
+      .get(context.familyId, mutationId) as { target_id: string | null } | undefined;
     if (previous?.target_id) return previous.target_id;
-    if (input.targetWorkerId) getWorkerRow(db, input.targetWorkerId);
+    if (input.targetWorkerId) getWorkerRow(db, context.familyId, input.targetWorkerId);
     db.prepare(`
       INSERT INTO tasks(
-        id, title, description, reward_seconds, target_worker_id,
+        id, family_id, title, description, reward_seconds, target_worker_id,
         timing_mode, minimum_duration_seconds, bonus_enabled,
         excellent_multiplier_bps, bonus_criteria,
         due_at, repeatable, status, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'published', ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'published', ?, ?)
     `).run(
       id,
+      context.familyId,
       input.title.trim(),
       input.description.trim(),
       input.rewardSeconds,
@@ -854,43 +981,51 @@ export function createTask(input: {
     );
     replaceTaskRewardBindingsWithin(
       db,
+      context.familyId,
       id,
       input.rewardBindings || [],
       input.bonusEnabled,
       now,
     );
     if (input.assignNow && input.targetWorkerId) {
-      createAssignmentWithin(db, getTaskRow(db, id), input.targetWorkerId, "admin");
+      createAssignmentWithin(
+        db,
+        context,
+        getTaskRow(db, context.familyId, id),
+        input.targetWorkerId,
+      );
     }
-    audit(db, "admin", "task_published", "task", id, `发布任务：${input.title.trim()}`, mutationId);
+    audit(db, context, "task_published", "task", id, `发布任务：${input.title.trim()}`, mutationId);
     return id;
   }).immediate();
 }
 
-export function submitRewardRequest(input: {
+export function submitRewardRequest(context: FamilyBusinessContext, input: {
   workerId: string;
   title: string;
   description: string;
   rewardSeconds: number;
   requestId?: string;
 }) {
+  assertActorCanManageWorker(context, input.workerId, false);
   const db = getDb();
   const id = uniqueId();
   const now = Date.now();
   const mutationId = requestId(input.requestId);
   return db.transaction(() => {
     const previous = db
-      .prepare("SELECT target_id FROM audit_logs WHERE request_id = ?")
-      .get(mutationId) as { target_id: string | null } | undefined;
+      .prepare("SELECT target_id FROM audit_logs WHERE family_id = ? AND request_id = ?")
+      .get(context.familyId, mutationId) as { target_id: string | null } | undefined;
     if (previous?.target_id) return previous.target_id;
-    getWorkerRow(db, input.workerId);
+    getWorkerRow(db, context.familyId, input.workerId);
     db.prepare(`
       INSERT INTO reward_requests(
-        id, worker_id, title, description, reward_seconds,
+        id, family_id, worker_id, title, description, reward_seconds,
         status, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, 'pending', ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?)
     `).run(
       id,
+      context.familyId,
       input.workerId,
       input.title.trim(),
       input.description.trim(),
@@ -900,7 +1035,7 @@ export function submitRewardRequest(input: {
     );
     audit(
       db,
-      actorForWorker(input.workerId),
+      context,
       "reward_request_submitted",
       "reward_request",
       id,
@@ -911,7 +1046,7 @@ export function submitRewardRequest(input: {
   })();
 }
 
-export function resubmitRewardRequest(input: {
+export function resubmitRewardRequest(context: FamilyBusinessContext, input: {
   workerId: string;
   rewardRequestId: string;
   title: string;
@@ -919,11 +1054,12 @@ export function resubmitRewardRequest(input: {
   rewardSeconds: number;
   requestId?: string;
 }) {
+  assertActorCanManageWorker(context, input.workerId, false);
   const db = getDb();
   const mutationId = requestId(input.requestId);
   const now = Date.now();
   db.transaction(() => {
-    const rewardRequest = getRewardRequestRow(db, input.rewardRequestId);
+    const rewardRequest = getRewardRequestRow(db, context.familyId, input.rewardRequestId);
     if (rewardRequest.worker_id !== input.workerId) {
       throw new AppError("不能修改别人的奖励申报。", 403, "FORBIDDEN");
     }
@@ -944,7 +1080,7 @@ export function resubmitRewardRequest(input: {
     );
     audit(
       db,
-      actorForWorker(input.workerId),
+      context,
       "reward_request_resubmitted",
       "reward_request",
       input.rewardRequestId,
@@ -954,16 +1090,17 @@ export function resubmitRewardRequest(input: {
   })();
 }
 
-export function cancelRewardRequest(input: {
+export function cancelRewardRequest(context: FamilyBusinessContext, input: {
   workerId: string;
   rewardRequestId: string;
   requestId?: string;
 }) {
+  assertActorCanManageWorker(context, input.workerId, false);
   const db = getDb();
   const mutationId = requestId(input.requestId);
   const now = Date.now();
   db.transaction(() => {
-    const rewardRequest = getRewardRequestRow(db, input.rewardRequestId);
+    const rewardRequest = getRewardRequestRow(db, context.familyId, input.rewardRequestId);
     if (rewardRequest.worker_id !== input.workerId) {
       throw new AppError("不能取消别人的奖励申报。", 403, "FORBIDDEN");
     }
@@ -974,23 +1111,26 @@ export function cancelRewardRequest(input: {
       UPDATE reward_requests SET status = 'cancelled', updated_at = ?, version = version + 1
       WHERE id = ?
     `).run(now, input.rewardRequestId);
-    audit(db, actorForWorker(input.workerId), "reward_request_cancelled", "reward_request", input.rewardRequestId, "取消自主申报", mutationId);
+    audit(db, context, "reward_request_cancelled", "reward_request", input.rewardRequestId, "取消自主申报", mutationId);
   })();
 }
 
-export function reviewRewardRequest(input: {
+export function reviewRewardRequest(context: FamilyBusinessContext, input: {
   rewardRequestId: string;
   decision: "approve" | "revision" | "reject";
   note: string;
   requestId?: string;
 }) {
+  requireFamilyManager(context);
   const db = getDb();
   const mutationId = requestId(input.requestId);
   const now = Date.now();
   return db.transaction(() => {
-    const existing = db.prepare("SELECT target_id FROM audit_logs WHERE request_id = ?").get(mutationId);
+    const existing = db
+      .prepare("SELECT target_id FROM audit_logs WHERE family_id = ? AND request_id = ?")
+      .get(context.familyId, mutationId);
     if (existing) return { duplicated: true, amountSeconds: 0 };
-    const rewardRequest = getRewardRequestRow(db, input.rewardRequestId);
+    const rewardRequest = getRewardRequestRow(db, context.familyId, input.rewardRequestId);
     if (rewardRequest.status !== "pending") {
       throw new AppError("这条奖励申报已经被处理，或还没有提交。", 409, "ALREADY_REVIEWED");
     }
@@ -1006,7 +1146,7 @@ export function reviewRewardRequest(input: {
       `).run(nextStatus, input.note.trim(), now, now, rewardRequest.id);
       audit(
         db,
-        "admin",
+        context,
         input.decision === "revision" ? "reward_request_revision" : "reward_request_rejected",
         "reward_request",
         rewardRequest.id,
@@ -1016,17 +1156,16 @@ export function reviewRewardRequest(input: {
       return { duplicated: false, amountSeconds: 0 };
     }
 
-    syncWorkerWithin(db, rewardRequest.worker_id, now);
-    const worker = getWorkerRow(db, rewardRequest.worker_id);
+    syncWorkerWithin(db, context.familyId, rewardRequest.worker_id, now);
+    const worker = getWorkerRow(db, context.familyId, rewardRequest.worker_id);
     const nextBalance = worker.balance_seconds + rewardRequest.reward_seconds;
-    const transactionId = insertTransaction(db, {
+    const transactionId = insertTransaction(db, context, {
       workerId: worker.id,
       type: "task_reward",
       title: rewardRequest.title,
       amountSeconds: rewardRequest.reward_seconds,
       balanceAfter: nextBalance,
-      actor: "admin",
-      reason: input.note.trim() || rewardRequest.description.trim() || "管理员审核自主申报",
+      reason: input.note.trim() || rewardRequest.description.trim() || "老板审核自主申报",
       requestId: mutationId,
       createdAt: now,
     });
@@ -1037,37 +1176,48 @@ export function reviewRewardRequest(input: {
         approved_transaction_id = ?, updated_at = ?, version = version + 1
       WHERE id = ?
     `).run(input.note.trim() || "审核通过", now, transactionId, now, rewardRequest.id);
-    audit(db, "admin", "reward_request_approved", "reward_request", rewardRequest.id, input.note.trim() || "发放自主申报奖励", mutationId);
+    audit(db, context, "reward_request_approved", "reward_request", rewardRequest.id, input.note.trim() || "发放自主申报奖励", mutationId);
     return { duplicated: false, amountSeconds: rewardRequest.reward_seconds };
   })();
 }
 
-export function closeTask(taskId: string, mutationId?: string) {
+export function closeTask(
+  context: FamilyBusinessContext,
+  taskId: string,
+  mutationId?: string,
+) {
+  requireFamilyManager(context);
   const db = getDb();
   const id = requestId(mutationId);
   db.transaction(() => {
-    getTaskRow(db, taskId);
+    getTaskRow(db, context.familyId, taskId);
     db.prepare("UPDATE tasks SET status = 'closed', updated_at = ? WHERE id = ?")
       .run(Date.now(), taskId);
-    audit(db, "admin", "task_closed", "task", taskId, "关闭任务", id);
+    audit(db, context, "task_closed", "task", taskId, "关闭任务", id);
   })();
 }
 
-export function setTaskStatus(taskId: string, status: "published" | "closed", mutationId?: string) {
+export function setTaskStatus(
+  context: FamilyBusinessContext,
+  taskId: string,
+  status: "published" | "closed",
+  mutationId?: string,
+) {
+  requireFamilyManager(context);
   const db = getDb();
   const id = requestId(mutationId);
   db.transaction(() => {
-    const task = getTaskRow(db, taskId);
+    const task = getTaskRow(db, context.familyId, taskId);
     if (status === "published" && task.due_at && task.due_at < Date.now()) {
       throw new AppError("截止时间已过，请先编辑截止时间再重新开启。", 409, "TASK_EXPIRED");
     }
     db.prepare("UPDATE tasks SET status = ?, updated_at = ? WHERE id = ?")
       .run(status, Date.now(), taskId);
-    audit(db, "admin", status === "published" ? "task_reopened" : "task_closed", "task", taskId, status === "published" ? "重新开启任务" : "关闭任务", id);
+    audit(db, context, status === "published" ? "task_reopened" : "task_closed", "task", taskId, status === "published" ? "重新开启任务" : "关闭任务", id);
   })();
 }
 
-export function updateTask(input: {
+export function updateTask(context: FamilyBusinessContext, input: {
   taskId: string;
   title: string;
   description: string;
@@ -1083,6 +1233,7 @@ export function updateTask(input: {
   dueAt?: number | null;
   requestId?: string;
 }) {
+  requireFamilyManager(context);
   const db = getDb();
   const mutationId = requestId(input.requestId);
   const excellentMultiplierBps = Math.round((input.excellentMultiplier ?? 2) * 10_000);
@@ -1090,8 +1241,8 @@ export function updateTask(input: {
     throw new AppError("优秀完成倍率必须是大于或等于 1 的有效数字。", 400, "INVALID_EXCELLENT_MULTIPLIER");
   }
   db.transaction(() => {
-    getTaskRow(db, input.taskId);
-    if (input.targetWorkerId) getWorkerRow(db, input.targetWorkerId);
+    getTaskRow(db, context.familyId, input.taskId);
+    if (input.targetWorkerId) getWorkerRow(db, context.familyId, input.targetWorkerId);
     const now = Date.now();
     db.prepare(`
       UPDATE tasks SET title = ?, description = ?, reward_seconds = ?, target_worker_id = ?,
@@ -1104,53 +1255,82 @@ export function updateTask(input: {
       excellentMultiplierBps, input.bonusEnabled ? input.bonusCriteria?.trim() || null : null,
       input.dueAt || null, input.repeatable ? 1 : 0, now, input.taskId,
     );
-    replaceTaskRewardBindingsWithin(db, input.taskId, input.rewardBindings || [], input.bonusEnabled, now);
-    audit(db, "admin", "task_updated", "task", input.taskId, `编辑任务：${input.title.trim()}`, mutationId);
+    replaceTaskRewardBindingsWithin(
+      db,
+      context.familyId,
+      input.taskId,
+      input.rewardBindings || [],
+      input.bonusEnabled,
+      now,
+    );
+    audit(db, context, "task_updated", "task", input.taskId, `编辑任务：${input.title.trim()}`, mutationId);
   })();
 }
 
-export function claimTask(workerId: string, taskId: string, mutationId?: string) {
+export function claimTask(
+  context: FamilyBusinessContext,
+  workerId: string,
+  taskId: string,
+  mutationId?: string,
+) {
+  assertActorCanManageWorker(context, workerId, false);
   const db = getDb();
   const id = requestId(mutationId);
   return db.transaction(() => {
-    syncWorkerWithin(db, workerId);
-    const assignmentId = createAssignmentWithin(db, getTaskRow(db, taskId), workerId, actorForWorker(workerId));
-    audit(db, actorForWorker(workerId), "task_claimed", "assignment", assignmentId, "领取任务", id);
+    syncWorkerWithin(db, context.familyId, workerId);
+    const assignmentId = createAssignmentWithin(
+      db,
+      context,
+      getTaskRow(db, context.familyId, taskId),
+      workerId,
+    );
+    audit(db, context, "task_claimed", "assignment", assignmentId, "领取任务", id);
     return assignmentId;
   })();
 }
 
-export function assignTask(taskId: string, workerId: string, mutationId?: string) {
+export function assignTask(
+  context: FamilyBusinessContext,
+  taskId: string,
+  workerId: string,
+  mutationId?: string,
+) {
+  requireFamilyManager(context);
   const db = getDb();
   const id = requestId(mutationId);
   return db.transaction(() => {
-    const assignmentId = createAssignmentWithin(db, getTaskRow(db, taskId), workerId, "admin");
-    audit(db, "admin", "task_assigned", "assignment", assignmentId, `分配给 ${workerId}`, id);
+    const assignmentId = createAssignmentWithin(
+      db,
+      context,
+      getTaskRow(db, context.familyId, taskId),
+      workerId,
+    );
+    audit(db, context, "task_assigned", "assignment", assignmentId, `分配给 ${workerId}`, id);
     return assignmentId;
   })();
 }
 
-export function startTimer(input: {
+export function startTimer(context: FamilyBusinessContext, input: {
   workerId: string;
   timerType: "reward_task" | "consumption";
   targetId: string;
-  actor: Actor;
   requestId?: string;
 }) {
+  assertActorCanManageWorker(context, input.workerId);
   const db = getDb();
   const mutationId = requestId(input.requestId);
   const now = Date.now();
   return db.transaction(() => {
-    syncWorkerWithin(db, input.workerId, now);
+    syncWorkerWithin(db, context.familyId, input.workerId, now);
     if (db.prepare("SELECT worker_id FROM active_timers WHERE worker_id = ?").get(input.workerId)) {
       throw new AppError("已经有一个任务在计时啦。", 409, "TIMER_ALREADY_ACTIVE");
     }
-    const worker = getWorkerRow(db, input.workerId);
+    const worker = getWorkerRow(db, context.familyId, input.workerId);
     let assignmentId: string | null = null;
     let activityId: string | null = null;
 
     if (input.timerType === "reward_task") {
-      const assignment = getAssignmentRow(db, input.targetId);
+      const assignment = getAssignmentRow(db, context.familyId, input.targetId);
       if (assignment.worker_id !== input.workerId) throw new AppError("不能操作别人的任务。", 403);
       if (!["claimed", "in_progress", "revision_requested"].includes(assignment.status)) {
         throw new AppError("这个任务现在不能开始计时。", 409, "INVALID_TASK_STATUS");
@@ -1163,8 +1343,8 @@ export function startTimer(input: {
         .run(now, assignment.id);
     } else {
       const activity = db
-        .prepare("SELECT * FROM consumption_activities WHERE id = ? AND is_active = 1")
-        .get(input.targetId) as ConsumptionRow | undefined;
+        .prepare("SELECT * FROM consumption_activities WHERE id = ? AND family_id = ? AND is_active = 1")
+        .get(input.targetId, context.familyId) as ConsumptionRow | undefined;
       if (!activity) throw new AppError("这个消耗项目不可用。", 404, "ACTIVITY_NOT_FOUND");
       if (worker.balance_seconds <= 0) {
         throw new AppError("时数不够啦，先完成一个任务吧。", 409, "INSUFFICIENT_BALANCE");
@@ -1177,13 +1357,27 @@ export function startTimer(input: {
         worker_id, timer_type, assignment_id, consumption_activity_id,
         started_at, started_by, request_id
       ) VALUES (?, ?, ?, ?, ?, ?, ?)
-    `).run(input.workerId, input.timerType, assignmentId, activityId, now, input.actor, mutationId);
-    audit(db, input.actor, "timer_started", input.timerType, input.targetId, "开始计时");
+    `).run(
+      input.workerId,
+      input.timerType,
+      assignmentId,
+      activityId,
+      now,
+      actorAuditFields(context.actor).key,
+      mutationId,
+    );
+    audit(db, context, "timer_started", input.timerType, input.targetId, "开始计时", mutationId);
     return now;
   })();
 }
 
-export function stopTimer(workerId: string, actor: Actor, mutationId?: string) {
+export function stopTimer(
+  context: FamilyBusinessContext,
+  workerId: string,
+  mutationId?: string,
+) {
+  assertActorCanManageWorker(context, workerId);
+  getWorkerRow(getDb(), context.familyId, workerId);
   const db = getDb();
   const id = requestId(mutationId);
   const now = Date.now();
@@ -1192,25 +1386,24 @@ export function stopTimer(workerId: string, actor: Actor, mutationId?: string) {
       .prepare("SELECT * FROM active_timers WHERE worker_id = ?")
       .get(workerId) as ActiveTimerRow | undefined;
     if (!timer) throw new AppError("现在没有正在计时的任务。", 409, "NO_ACTIVE_TIMER");
-    const result = stopTimerWithin(db, timer, actor, now, id);
-    audit(db, actor, "timer_stopped", timer.timer_type, timer.assignment_id || timer.consumption_activity_id, "结束计时");
+    const result = stopTimerWithin(db, context, timer, now, id);
+    audit(db, context, "timer_stopped", timer.timer_type, timer.assignment_id || timer.consumption_activity_id, "结束计时", id);
     return result;
   })();
 }
 
-export function cancelConsumptionTimer(input: {
+export function cancelConsumptionTimer(context: FamilyBusinessContext, input: {
   workerId: string;
-  actor: Actor;
   requestId?: string;
 }) {
+  assertActorCanManageWorker(context, input.workerId);
   const db = getDb();
   const mutationId = requestId(input.requestId);
   const now = Date.now();
   return db.transaction(() => {
-    assertActorCanManageWorker(input.actor, input.workerId);
     const previousRequest = db
-      .prepare("SELECT target_id FROM audit_logs WHERE request_id = ?")
-      .get(mutationId);
+      .prepare("SELECT target_id FROM audit_logs WHERE family_id = ? AND request_id = ?")
+      .get(context.familyId, mutationId);
     if (previousRequest) return { duplicated: true };
 
     const timer = db
@@ -1219,14 +1412,14 @@ export function cancelConsumptionTimer(input: {
     if (!timer || timer.timer_type !== "consumption") {
       throw new AppError("现在没有可以撤销的消耗计时。", 409, "NO_CONSUMPTION_TIMER");
     }
-    if (input.actor !== "admin" && elapsedSeconds(timer.started_at, now) > 30) {
-      throw new AppError("误触取消只在开始后的 30 秒内可用，请联系管理员处理。", 409, "UNDO_WINDOW_EXPIRED");
+    if (!isFamilyManager(context) && elapsedSeconds(timer.started_at, now) > 30) {
+      throw new AppError("误触取消只在开始后的 30 秒内可用，请联系老板处理。", 409, "UNDO_WINDOW_EXPIRED");
     }
 
     db.prepare("DELETE FROM active_timers WHERE worker_id = ?").run(input.workerId);
     audit(
       db,
-      input.actor,
+      context,
       "consumption_timer_cancelled",
       "consumption_activity",
       timer.consumption_activity_id,
@@ -1237,23 +1430,29 @@ export function cancelConsumptionTimer(input: {
   })();
 }
 
-export function reverseConsumptionTransaction(input: {
+export function reverseConsumptionTransaction(context: FamilyBusinessContext, input: {
   transactionId: string;
   reason?: string;
   requestId?: string;
 }) {
+  requireFamilyManager(context);
   const db = getDb();
   const mutationId = requestId(input.requestId);
   const now = Date.now();
   return db.transaction(() => {
     const previousRequest = db
-      .prepare("SELECT original_transaction_id FROM transaction_reversals WHERE request_id = ?")
-      .get(mutationId);
+      .prepare(`
+        SELECT reversal.original_transaction_id
+        FROM transaction_reversals reversal
+        JOIN transactions original ON original.id = reversal.original_transaction_id
+        WHERE reversal.request_id = ? AND original.family_id = ?
+      `)
+      .get(mutationId, context.familyId);
     if (previousRequest) return { duplicated: true };
 
     const original = db
-      .prepare("SELECT * FROM transactions WHERE id = ?")
-      .get(input.transactionId) as TransactionRow | undefined;
+      .prepare("SELECT * FROM transactions WHERE id = ? AND family_id = ?")
+      .get(input.transactionId, context.familyId) as TransactionRow | undefined;
     if (!original) throw new AppError("没有找到这条消耗明细。", 404, "TRANSACTION_NOT_FOUND");
     if (original.type !== "consumption" || original.amount_seconds >= 0) {
       throw new AppError("只有消耗明细可以撤销。", 409, "TRANSACTION_NOT_REVERSIBLE");
@@ -1262,21 +1461,20 @@ export function reverseConsumptionTransaction(input: {
       throw new AppError("这笔消耗已经撤销过了。", 409, "TRANSACTION_ALREADY_REVERSED");
     }
 
-    const beforeSync = getWorkerRow(db, original.worker_id, true);
-    if (beforeSync.is_active) syncWorkerWithin(db, original.worker_id, now);
-    const worker = getWorkerRow(db, original.worker_id, true);
+    const beforeSync = getWorkerRow(db, context.familyId, original.worker_id, true);
+    if (beforeSync.is_active) syncWorkerWithin(db, context.familyId, original.worker_id, now);
+    const worker = getWorkerRow(db, context.familyId, original.worker_id, true);
     const refundSeconds = Math.abs(original.amount_seconds);
     const nextBalance = worker.balance_seconds + refundSeconds;
     const reason = input.reason?.trim() || "误触消耗原额退回";
     db.prepare("UPDATE workers SET balance_seconds = ?, updated_at = ? WHERE id = ?")
       .run(nextBalance, now, worker.id);
-    const reversalTransactionId = insertTransaction(db, {
+    const reversalTransactionId = insertTransaction(db, context, {
       workerId: worker.id,
       type: "admin_adjustment",
       title: `撤销消耗：${original.title}`,
       amountSeconds: refundSeconds,
       balanceAfter: nextBalance,
-      actor: "admin",
       reason,
       requestId: mutationId,
       createdAt: now,
@@ -1285,11 +1483,19 @@ export function reverseConsumptionTransaction(input: {
       INSERT INTO transaction_reversals(
         id, original_transaction_id, reversal_transaction_id,
         actor, reason, request_id, created_at
-      ) VALUES (?, ?, ?, 'admin', ?, ?, ?)
-    `).run(uniqueId(), original.id, reversalTransactionId, reason, mutationId, now);
+      ) VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      uniqueId(),
+      original.id,
+      reversalTransactionId,
+      actorAuditFields(context.actor).key,
+      reason,
+      mutationId,
+      now,
+    );
     audit(
       db,
-      "admin",
+      context,
       "consumption_transaction_reversed",
       "transaction",
       original.id,
@@ -1300,10 +1506,9 @@ export function reverseConsumptionTransaction(input: {
   })();
 }
 
-export function setAssignmentDuration(input: {
+export function setAssignmentDuration(context: FamilyBusinessContext, input: {
   assignmentId: string;
   durationSeconds: number;
-  actor: Actor;
   reason?: string;
   requestId?: string;
 }) {
@@ -1311,18 +1516,23 @@ export function setAssignmentDuration(input: {
   const mutationId = requestId(input.requestId);
   const now = Date.now();
   return db.transaction(() => {
-    const assignment = getAssignmentRow(db, input.assignmentId);
-    assertActorCanManageWorker(input.actor, assignment.worker_id);
+    const assignment = getAssignmentRow(db, context.familyId, input.assignmentId);
+    assertActorCanManageWorker(context, assignment.worker_id);
     if (!Number.isInteger(input.durationSeconds) || input.durationSeconds < 0 || input.durationSeconds > 86_400) {
       throw new AppError("累计时长必须是 0 到 24 小时之间的整数秒。", 400, "INVALID_DURATION");
     }
 
     const previousRequest = db
-      .prepare("SELECT id FROM timer_adjustments WHERE request_id = ?")
-      .get(mutationId);
+      .prepare(`
+        SELECT adjustment.id
+        FROM timer_adjustments adjustment
+        JOIN workers worker ON worker.id = adjustment.worker_id
+        WHERE adjustment.request_id = ? AND worker.family_id = ?
+      `)
+      .get(mutationId, context.familyId);
     if (previousRequest) return assignmentDuration(db, assignment.id);
 
-    const editableStatuses = input.actor === "admin"
+    const editableStatuses = isFamilyManager(context)
       ? ["claimed", "in_progress", "submitted", "revision_requested"]
       : ["claimed", "in_progress", "revision_requested"];
     if (!editableStatuses.includes(assignment.status)) {
@@ -1342,7 +1552,7 @@ export function setAssignmentDuration(input: {
     const delta = input.durationSeconds - currentDuration;
     if (delta === 0) return currentDuration;
     const reason = input.reason?.trim()
-      || (input.actor === "admin" ? "管理员手动修正累计时长" : "打工人手动修正累计时长");
+      || (isFamilyManager(context) ? "老板手动修正累计时长" : "打工人手动修正累计时长");
     db.prepare(`
       INSERT INTO timer_adjustments(
         id, worker_id, assignment_id, delta_seconds, actor, reason, request_id, created_at
@@ -1352,7 +1562,7 @@ export function setAssignmentDuration(input: {
       assignment.worker_id,
       assignment.id,
       delta,
-      input.actor,
+      actorAuditFields(context.actor).key,
       reason,
       mutationId,
       now,
@@ -1361,7 +1571,7 @@ export function setAssignmentDuration(input: {
       .run(now, assignment.id);
     audit(
       db,
-      input.actor,
+      context,
       "task_duration_set",
       "assignment",
       assignment.id,
@@ -1372,9 +1582,8 @@ export function setAssignmentDuration(input: {
   })();
 }
 
-export function cancelAssignment(input: {
+export function cancelAssignment(context: FamilyBusinessContext, input: {
   assignmentId: string;
-  actor: Actor;
   reason?: string;
   requestId?: string;
 }) {
@@ -1383,13 +1592,13 @@ export function cancelAssignment(input: {
   const now = Date.now();
   return db.transaction(() => {
     const previousRequest = db
-      .prepare("SELECT target_id FROM audit_logs WHERE request_id = ?")
-      .get(mutationId);
+      .prepare("SELECT target_id FROM audit_logs WHERE family_id = ? AND request_id = ?")
+      .get(context.familyId, mutationId);
     if (previousRequest) return { duplicated: true };
 
-    const assignment = getAssignmentRow(db, input.assignmentId);
-    assertActorCanManageWorker(input.actor, assignment.worker_id);
-    const cancellableStatuses = input.actor === "admin"
+    const assignment = getAssignmentRow(db, context.familyId, input.assignmentId);
+    assertActorCanManageWorker(context, assignment.worker_id);
+    const cancellableStatuses = isFamilyManager(context)
       ? ["claimed", "in_progress", "submitted", "revision_requested"]
       : ["claimed", "in_progress", "revision_requested"];
     if (!cancellableStatuses.includes(assignment.status)) {
@@ -1406,47 +1615,46 @@ export function cancelAssignment(input: {
       .prepare("SELECT * FROM active_timers WHERE worker_id = ? AND assignment_id = ?")
       .get(assignment.worker_id, assignment.id) as ActiveTimerRow | undefined;
     if (activeTimer) {
-      stopTimerWithin(db, activeTimer, input.actor, now, `cancel-stop:${mutationId}`);
+      stopTimerWithin(db, context, activeTimer, now, `cancel-stop:${mutationId}`);
     }
     db.prepare(`
       UPDATE task_assignments
       SET status = 'cancelled', updated_at = ?, version = version + 1
       WHERE id = ?
     `).run(now, assignment.id);
-    const reason = input.reason?.trim() || (input.actor === "admin" ? "管理员撤销误操作任务" : "打工人取消任务");
-    audit(db, input.actor, "assignment_cancelled", "assignment", assignment.id, reason, mutationId);
+    const reason = input.reason?.trim() || (isFamilyManager(context) ? "老板撤销误操作任务" : "打工人取消任务");
+    audit(db, context, "assignment_cancelled", "assignment", assignment.id, reason, mutationId);
     return { duplicated: false };
   })();
 }
 
-export function manualConsumption(input: {
+export function manualConsumption(context: FamilyBusinessContext, input: {
   workerId: string;
   activityId: string;
   durationSeconds: number;
-  actor: Actor;
   requestId?: string;
 }) {
   const db = getDb();
   const mutationId = requestId(input.requestId);
   const now = Date.now();
   return db.transaction(() => {
-    assertActorCanManageWorker(input.actor, input.workerId);
+    assertActorCanManageWorker(context, input.workerId);
     if (!Number.isInteger(input.durationSeconds) || input.durationSeconds <= 0 || input.durationSeconds > 86_400) {
       throw new AppError("消耗时长必须是 1 秒到 24 小时之间的整数。", 400, "INVALID_DURATION");
     }
     const previous = db
-      .prepare("SELECT id FROM transactions WHERE request_id = ?")
-      .get(mutationId);
+      .prepare("SELECT id FROM transactions WHERE family_id = ? AND request_id = ?")
+      .get(context.familyId, mutationId);
     if (previous) return { duplicated: true };
 
-    syncWorkerWithin(db, input.workerId, now);
-    const worker = getWorkerRow(db, input.workerId);
+    syncWorkerWithin(db, context.familyId, input.workerId, now);
+    const worker = getWorkerRow(db, context.familyId, input.workerId);
     if (db.prepare("SELECT worker_id FROM active_timers WHERE worker_id = ?").get(worker.id)) {
       throw new AppError("请先结束当前计时，再直接填写消耗。", 409, "TIMER_ACTIVE");
     }
     const activity = db
-      .prepare("SELECT * FROM consumption_activities WHERE id = ? AND is_active = 1")
-      .get(input.activityId) as ConsumptionRow | undefined;
+      .prepare("SELECT * FROM consumption_activities WHERE id = ? AND family_id = ? AND is_active = 1")
+      .get(input.activityId, context.familyId) as ConsumptionRow | undefined;
     if (!activity) throw new AppError("这个消耗项目不可用。", 404, "ACTIVITY_NOT_FOUND");
     if (input.durationSeconds > worker.balance_seconds) {
       throw new AppError("填写的消耗时长超过当前余额。", 409, "INSUFFICIENT_BALANCE");
@@ -1455,15 +1663,14 @@ export function manualConsumption(input: {
     const nextBalance = worker.balance_seconds - input.durationSeconds;
     db.prepare("UPDATE workers SET balance_seconds = ?, updated_at = ? WHERE id = ?")
       .run(nextBalance, now, worker.id);
-    insertTransaction(db, {
+    insertTransaction(db, context, {
       workerId: worker.id,
       type: "consumption",
       title: `${activity.name}（手动填写）`,
       amountSeconds: -input.durationSeconds,
       balanceAfter: nextBalance,
       consumptionActivityId: activity.id,
-      actor: input.actor,
-      reason: input.actor === "admin" ? "管理员代为填写" : "本人直接填写",
+      reason: isFamilyManager(context) ? "老板代为填写" : "本人直接填写",
       requestId: mutationId,
       startedAt: now - input.durationSeconds * 1000,
       endedAt: now,
@@ -1471,7 +1678,7 @@ export function manualConsumption(input: {
     });
     audit(
       db,
-      input.actor,
+      context,
       "manual_consumption_created",
       "worker",
       worker.id,
@@ -1482,20 +1689,20 @@ export function manualConsumption(input: {
   })();
 }
 
-export function submitAssignment(input: {
+export function submitAssignment(context: FamilyBusinessContext, input: {
   workerId: string;
   assignmentId: string;
   note: string;
-  actor: Actor;
   requestId?: string;
   overrideMinimum?: boolean;
 }) {
+  assertActorCanManageWorker(context, input.workerId, false);
   const db = getDb();
   const mutationId = requestId(input.requestId);
   const now = Date.now();
   db.transaction(() => {
-    syncWorkerWithin(db, input.workerId, now);
-    let assignment = getAssignmentRow(db, input.assignmentId);
+    syncWorkerWithin(db, context.familyId, input.workerId, now);
+    let assignment = getAssignmentRow(db, context.familyId, input.assignmentId);
     if (assignment.worker_id !== input.workerId) throw new AppError("不能提交别人的任务。", 403);
     if (!["claimed", "in_progress", "revision_requested"].includes(assignment.status)) {
       throw new AppError("这个任务现在不能提交。", 409, "INVALID_TASK_STATUS");
@@ -1507,8 +1714,8 @@ export function submitAssignment(input: {
       if (active.assignment_id !== assignment.id) {
         throw new AppError("请先结束当前正在计时的任务。", 409, "OTHER_TIMER_ACTIVE");
       }
-      stopTimerWithin(db, active, input.actor, now, `submit-stop:${mutationId}`);
-      assignment = getAssignmentRow(db, input.assignmentId);
+      stopTimerWithin(db, context, active, now, `submit-stop:${mutationId}`);
+      assignment = getAssignmentRow(db, context.familyId, input.assignmentId);
     }
     const duration = assignmentDuration(db, assignment.id);
     if (
@@ -1524,23 +1731,26 @@ export function submitAssignment(input: {
         updated_at = ?, version = version + 1
       WHERE id = ?
     `).run(input.note.trim(), now, now, assignment.id);
-    audit(db, input.actor, "task_submitted", "assignment", assignment.id, input.note.trim(), mutationId);
+    audit(db, context, "task_submitted", "assignment", assignment.id, input.note.trim(), mutationId);
   })();
 }
 
-export function reviewAssignment(input: {
+export function reviewAssignment(context: FamilyBusinessContext, input: {
   assignmentId: string;
   decision: "approve" | "excellent" | "double" | "revision" | "reject";
   note: string;
   requestId?: string;
 }) {
+  requireFamilyManager(context);
   const db = getDb();
   const mutationId = requestId(input.requestId);
   const now = Date.now();
   return db.transaction(() => {
-    const existing = db.prepare("SELECT target_id FROM audit_logs WHERE request_id = ?").get(mutationId);
+    const existing = db
+      .prepare("SELECT target_id FROM audit_logs WHERE family_id = ? AND request_id = ?")
+      .get(context.familyId, mutationId);
     if (existing) return { duplicated: true };
-    const assignment = getAssignmentRow(db, input.assignmentId);
+    const assignment = getAssignmentRow(db, context.familyId, input.assignmentId);
     if (assignment.status !== "submitted") {
       throw new AppError("这个任务已经被处理，或还没有提交。", 409, "ALREADY_REVIEWED");
     }
@@ -1557,7 +1767,7 @@ export function reviewAssignment(input: {
         UPDATE task_assignments SET status = 'revision_requested', review_note = ?,
           reviewed_at = ?, updated_at = ?, version = version + 1 WHERE id = ?
       `).run(input.note.trim(), now, now, assignment.id);
-      audit(db, "admin", "review_revision", "assignment", assignment.id, input.note.trim(), mutationId);
+      audit(db, context, "review_revision", "assignment", assignment.id, input.note.trim(), mutationId);
       return { duplicated: false, amountSeconds: 0 };
     }
     if (input.decision === "reject") {
@@ -1565,12 +1775,12 @@ export function reviewAssignment(input: {
         UPDATE task_assignments SET status = 'rejected', review_note = ?,
           reviewed_at = ?, updated_at = ?, version = version + 1 WHERE id = ?
       `).run(input.note.trim(), now, now, assignment.id);
-      audit(db, "admin", "review_rejected", "assignment", assignment.id, input.note.trim(), mutationId);
+      audit(db, context, "review_rejected", "assignment", assignment.id, input.note.trim(), mutationId);
       return { duplicated: false, amountSeconds: 0 };
     }
 
-    syncWorkerWithin(db, assignment.worker_id, now);
-    const worker = getWorkerRow(db, assignment.worker_id);
+    syncWorkerWithin(db, context.familyId, assignment.worker_id, now);
+    const worker = getWorkerRow(db, context.familyId, assignment.worker_id);
     const multiplierBps = excellent ? assignment.excellent_multiplier_bps : 10_000;
     const multiplier = multiplierBps / 10_000;
     const amount = Math.round(assignment.reward_seconds * multiplierBps / 10_000);
@@ -1584,7 +1794,7 @@ export function reviewAssignment(input: {
     const transactionId = uniqueId();
     db.prepare("UPDATE workers SET balance_seconds = ?, updated_at = ? WHERE id = ?")
       .run(nextBalance, now, worker.id);
-    insertTransaction(db, {
+    insertTransaction(db, context, {
       id: transactionId,
       workerId: worker.id,
       type: "task_reward",
@@ -1592,12 +1802,11 @@ export function reviewAssignment(input: {
       amountSeconds: amount,
       balanceAfter: nextBalance,
       assignmentId: assignment.id,
-      actor: "admin",
       reason: input.note.trim() || (excellent ? `优秀完成，基础时数 ×${multiplier}` : "审核通过"),
       requestId: mutationId,
       createdAt: now,
     });
-    const rewardGrant = grantAssignmentRewardsWithin(db, {
+    const rewardGrant = grantAssignmentRewardsWithin(db, context, {
       assignmentId: assignment.id,
       workerId: worker.id,
       excellent,
@@ -1623,7 +1832,7 @@ export function reviewAssignment(input: {
     );
     audit(
       db,
-      "admin",
+      context,
       excellent ? "review_excellent" : "review_approved",
       "assignment",
       assignment.id,
@@ -1639,13 +1848,14 @@ export function reviewAssignment(input: {
   }).immediate();
 }
 
-export function grantQuickReward(input: {
+export function grantQuickReward(context: FamilyBusinessContext, input: {
   workerId: string;
   title: string;
   rewardSeconds: number;
   note?: string;
   requestId?: string;
 }) {
+  requireFamilyManager(context);
   const db = getDb();
   const mutationId = requestId(input.requestId);
   const now = Date.now();
@@ -1664,29 +1874,28 @@ export function grantQuickReward(input: {
 
   return db.transaction(() => {
     const previous = db
-      .prepare("SELECT id FROM transactions WHERE request_id = ?")
-      .get(mutationId) as { id: string } | undefined;
+      .prepare("SELECT id FROM transactions WHERE family_id = ? AND request_id = ?")
+      .get(context.familyId, mutationId) as { id: string } | undefined;
     if (previous) return { duplicated: true, transactionId: previous.id };
 
-    syncWorkerWithin(db, input.workerId, now);
-    const worker = getWorkerRow(db, input.workerId);
+    syncWorkerWithin(db, context.familyId, input.workerId, now);
+    const worker = getWorkerRow(db, context.familyId, input.workerId);
     const nextBalance = worker.balance_seconds + input.rewardSeconds;
     db.prepare("UPDATE workers SET balance_seconds = ?, updated_at = ? WHERE id = ?")
       .run(nextBalance, now, worker.id);
-    const transactionId = insertTransaction(db, {
+    const transactionId = insertTransaction(db, context, {
       workerId: worker.id,
       type: "task_reward",
       title,
       amountSeconds: input.rewardSeconds,
       balanceAfter: nextBalance,
-      actor: "admin",
-      reason: note || "管理员快速补录奖励",
+      reason: note || "老板快速补录奖励",
       requestId: mutationId,
       createdAt: now,
     });
     audit(
       db,
-      "admin",
+      context,
       "quick_reward_granted",
       "transaction",
       transactionId,
@@ -1702,112 +1911,127 @@ export function grantQuickReward(input: {
   })();
 }
 
-export function adjustBalance(input: {
+export function adjustBalance(context: FamilyBusinessContext, input: {
   workerId: string;
   amountSeconds: number;
   reason: string;
   requestId?: string;
 }) {
+  requireFamilyManager(context);
   const db = getDb();
   const mutationId = requestId(input.requestId);
   return db.transaction(() => {
-    syncWorkerWithin(db, input.workerId);
-    const worker = getWorkerRow(db, input.workerId);
+    syncWorkerWithin(db, context.familyId, input.workerId);
+    const worker = getWorkerRow(db, context.familyId, input.workerId);
     const nextBalance = worker.balance_seconds + input.amountSeconds;
     if (input.amountSeconds === 0) throw new AppError("调整时数不能为 0。", 400);
     if (nextBalance < 0) throw new AppError("扣除后余额不能小于 0。", 409, "NEGATIVE_BALANCE");
     db.prepare("UPDATE workers SET balance_seconds = ?, updated_at = ? WHERE id = ?")
       .run(nextBalance, Date.now(), worker.id);
-    insertTransaction(db, {
+    insertTransaction(db, context, {
       workerId: worker.id,
       type: "admin_adjustment",
-      title: "管理员调整",
+      title: "老板调整",
       amountSeconds: input.amountSeconds,
       balanceAfter: nextBalance,
-      actor: "admin",
       reason: input.reason.trim(),
       requestId: mutationId,
     });
-    audit(db, "admin", "balance_adjusted", "worker", worker.id, input.reason.trim());
+    audit(db, context, "balance_adjusted", "worker", worker.id, input.reason.trim(), mutationId);
     return nextBalance;
   })();
 }
 
-export function createConsumptionActivity(input: {
+export function createConsumptionActivity(context: FamilyBusinessContext, input: {
   name: string;
   icon?: string;
   requestId?: string;
 }) {
+  requireFamilyManager(context);
   const db = getDb();
   const id = uniqueId();
   const mutationId = requestId(input.requestId);
   const now = Date.now();
   db.transaction(() => {
-    const max = db.prepare("SELECT COALESCE(MAX(sort_order), 0) AS value FROM consumption_activities").get() as { value: number };
+    const max = db
+      .prepare("SELECT COALESCE(MAX(sort_order), 0) AS value FROM consumption_activities WHERE family_id = ?")
+      .get(context.familyId) as { value: number };
     db.prepare(`
-      INSERT INTO consumption_activities(id, name, icon, sort_order, is_active, created_at, updated_at)
-      VALUES (?, ?, ?, ?, 1, ?, ?)
-    `).run(id, input.name.trim(), input.icon || "clock", max.value + 10, now, now);
-    audit(db, "admin", "activity_created", "consumption_activity", id, input.name.trim(), mutationId);
+      INSERT INTO consumption_activities(
+        id, family_id, name, icon, sort_order, is_active, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, 1, ?, ?)
+    `).run(id, context.familyId, input.name.trim(), input.icon || "clock", max.value + 10, now, now);
+    audit(db, context, "activity_created", "consumption_activity", id, input.name.trim(), mutationId);
   })();
   return id;
 }
 
-export function toggleConsumptionActivity(activityId: string, active: boolean, mutationId?: string) {
+export function toggleConsumptionActivity(
+  context: FamilyBusinessContext,
+  activityId: string,
+  active: boolean,
+  mutationId?: string,
+) {
+  requireFamilyManager(context);
   const db = getDb();
   const id = requestId(mutationId);
-  const row = db.prepare("SELECT id FROM consumption_activities WHERE id = ?").get(activityId);
+  const row = db
+    .prepare("SELECT id FROM consumption_activities WHERE id = ? AND family_id = ?")
+    .get(activityId, context.familyId);
   if (!row) throw new AppError("没有找到这个消耗项目。", 404);
   db.transaction(() => {
     db.prepare("UPDATE consumption_activities SET is_active = ?, updated_at = ? WHERE id = ?")
       .run(active ? 1 : 0, Date.now(), activityId);
-    audit(db, "admin", active ? "activity_enabled" : "activity_disabled", "consumption_activity", activityId, null, id);
+    audit(db, context, active ? "activity_enabled" : "activity_disabled", "consumption_activity", activityId, null, id);
   })();
 }
 
-export function getWorkerState(workerId: string) {
+export function getWorkerState(context: FamilyBusinessContext, workerId: string) {
+  assertActorCanManageWorker(context, workerId);
   const db = getDb();
-  syncWorker(workerId);
-  const worker = getWorkerRow(db, workerId);
+  syncWorker(context, workerId);
+  const worker = getWorkerRow(db, context.familyId, workerId);
   const now = Date.now();
   const availableTasks = (db.prepare(`
     SELECT t.* FROM tasks t
-    WHERE t.status = 'published'
+    WHERE t.family_id = ? AND t.status = 'published'
       AND (t.target_worker_id IS NULL OR t.target_worker_id = ?)
       AND (t.available_from IS NULL OR t.available_from <= ?)
       AND (t.due_at IS NULL OR t.due_at >= ?)
       AND NOT EXISTS (
         SELECT 1 FROM task_assignments a
-        WHERE a.task_id = t.id AND a.worker_id = ?
+        WHERE a.family_id = ? AND a.task_id = t.id AND a.worker_id = ?
           AND (
             a.status IN ('claimed', 'in_progress', 'submitted', 'revision_requested')
             OR (t.repeatable = 0 AND a.status <> 'cancelled')
           )
       )
     ORDER BY t.created_at DESC
-  `).all(workerId, now, now, workerId) as TaskRow[]).map((row) => publicTask(db, row, true));
+  `).all(context.familyId, workerId, now, now, context.familyId, workerId) as TaskRow[])
+    .map((row) => publicTask(db, context.familyId, row, true));
   const assignments = (db
-    .prepare("SELECT * FROM task_assignments WHERE worker_id = ? ORDER BY updated_at DESC")
-    .all(workerId) as AssignmentRow[]).map((row) => publicAssignment(db, row, true));
+    .prepare("SELECT * FROM task_assignments WHERE family_id = ? AND worker_id = ? ORDER BY updated_at DESC")
+    .all(context.familyId, workerId) as AssignmentRow[])
+    .map((row) => publicAssignment(db, context.familyId, row, true));
   const rewardRequests = (db
-    .prepare("SELECT * FROM reward_requests WHERE worker_id = ? ORDER BY updated_at DESC LIMIT 50")
-    .all(workerId) as RewardRequestRow[]).map((row) => publicRewardRequest(row));
+    .prepare("SELECT * FROM reward_requests WHERE family_id = ? AND worker_id = ? ORDER BY updated_at DESC LIMIT 50")
+    .all(context.familyId, workerId) as RewardRequestRow[]).map((row) => publicRewardRequest(row));
   const activeTimer = db
     .prepare("SELECT * FROM active_timers WHERE worker_id = ?")
     .get(workerId) as ActiveTimerRow | undefined;
   const activities = (db
-    .prepare("SELECT * FROM consumption_activities WHERE is_active = 1 ORDER BY sort_order, created_at")
-    .all() as ConsumptionRow[]).map(publicActivity);
+    .prepare("SELECT * FROM consumption_activities WHERE family_id = ? AND is_active = 1 ORDER BY sort_order, created_at")
+    .all(context.familyId) as ConsumptionRow[]).map(publicActivity);
   const transactions = (db
     .prepare(`
       SELECT tr.*,
         EXISTS(SELECT 1 FROM transaction_reversals rv WHERE rv.original_transaction_id = tr.id) AS is_reversed,
         (SELECT rv.original_transaction_id FROM transaction_reversals rv WHERE rv.reversal_transaction_id = tr.id) AS reversal_of_transaction_id
       FROM transactions tr
-      WHERE tr.worker_id = ?
+      WHERE tr.family_id = ? AND tr.worker_id = ?
       ORDER BY tr.created_at DESC LIMIT 100
     `)
-    .all(workerId) as TransactionRow[]).map((row) => publicTransaction(row));
+    .all(context.familyId, workerId) as TransactionRow[]).map((row) => publicTransaction(row));
   const today = dateKey(now, worker.timezone);
   const todayTransactions = transactions.filter((row) => dateKey(row.createdAt, worker.timezone) === today);
   const pendingRewardSeconds = assignments
@@ -1819,14 +2043,14 @@ export function getWorkerState(workerId: string) {
   const dailyGrant = db
     .prepare("SELECT amount_seconds FROM daily_grants WHERE worker_id = ? AND reward_date = ?")
     .get(workerId, today) as { amount_seconds: number } | undefined;
-  const rewardState = getWorkerRewardState(workerId, now);
+  const rewardState = getWorkerRewardState(context, workerId, now);
 
   return {
-    worker: publicWorker(db, getWorkerRow(db, workerId)),
+    worker: publicWorker(db, getWorkerRow(db, context.familyId, workerId)),
     availableTasks,
     assignments,
     rewardRequests,
-    activeTimer: publicTimer(db, activeTimer),
+    activeTimer: publicTimer(db, context.familyId, activeTimer),
     activities,
     transactions,
     ...rewardState,
@@ -1843,33 +2067,39 @@ export function getWorkerState(workerId: string) {
   };
 }
 
-export function getAdminState() {
+export function getAdminState(context: FamilyBusinessContext) {
+  requireFamilyManager(context);
   const db = getDb();
   const workers = db
-    .prepare("SELECT * FROM workers ORDER BY is_active DESC, created_at")
-    .all() as WorkerRow[];
+    .prepare("SELECT * FROM workers WHERE family_id = ? ORDER BY is_active DESC, created_at")
+    .all(context.familyId) as WorkerRow[];
   for (const worker of workers) {
-    if (worker.is_active) syncWorker(worker.id);
+    if (worker.is_active) syncWorker(context, worker.id);
   }
   const refreshedWorkers = db
-    .prepare("SELECT * FROM workers ORDER BY is_active DESC, created_at")
-    .all() as WorkerRow[];
-  const timers = db.prepare("SELECT * FROM active_timers").all() as ActiveTimerRow[];
+    .prepare("SELECT * FROM workers WHERE family_id = ? ORDER BY is_active DESC, created_at")
+    .all(context.familyId) as WorkerRow[];
+  const timers = db.prepare(`
+    SELECT timer.*
+    FROM active_timers timer
+    JOIN workers worker ON worker.id = timer.worker_id
+    WHERE worker.family_id = ?
+  `).all(context.familyId) as ActiveTimerRow[];
   const assignmentRows = db
-    .prepare("SELECT * FROM task_assignments ORDER BY updated_at DESC")
-    .all() as AssignmentRow[];
-  const assignments = assignmentRows.map((row) => publicAssignment(db, row));
+    .prepare("SELECT * FROM task_assignments WHERE family_id = ? ORDER BY updated_at DESC")
+    .all(context.familyId) as AssignmentRow[];
+  const assignments = assignmentRows.map((row) => publicAssignment(db, context.familyId, row));
   const rewardRequestRows = db.prepare(`
     SELECT rr.*, w.name AS worker_name
     FROM reward_requests rr JOIN workers w ON w.id = rr.worker_id
-    WHERE rr.status = 'pending'
+    WHERE rr.family_id = ? AND rr.status = 'pending'
     ORDER BY rr.created_at ASC
-  `).all() as Array<RewardRequestRow & { worker_name: string }>;
+  `).all(context.familyId) as Array<RewardRequestRow & { worker_name: string }>;
   const rewardRequests = rewardRequestRows.map((row) => publicRewardRequest(row, row.worker_name));
   const tasks = (db
-    .prepare("SELECT * FROM tasks ORDER BY (status = 'published') DESC, updated_at DESC")
-    .all() as TaskRow[]).map((row) => ({
-    ...publicTask(db, row),
+    .prepare("SELECT * FROM tasks WHERE family_id = ? ORDER BY (status = 'published') DESC, updated_at DESC")
+    .all(context.familyId) as TaskRow[]).map((row) => ({
+    ...publicTask(db, context.familyId, row),
     assignmentCount: assignmentRows.filter((assignment) => assignment.task_id === row.id && assignment.status !== "cancelled").length,
     assignedWorkerIds: assignmentRows
       .filter((assignment) => assignment.task_id === row.id && (
@@ -1880,16 +2110,17 @@ export function getAdminState() {
       .map((assignment) => assignment.worker_id),
   }));
   const activities = (db
-    .prepare("SELECT * FROM consumption_activities ORDER BY sort_order, created_at")
-    .all() as ConsumptionRow[]).map(publicActivity);
+    .prepare("SELECT * FROM consumption_activities WHERE family_id = ? ORDER BY sort_order, created_at")
+    .all(context.familyId) as ConsumptionRow[]).map(publicActivity);
   const transactionRows = db.prepare(`
     SELECT tr.*, w.name AS worker_name,
       EXISTS(SELECT 1 FROM transaction_reversals rv WHERE rv.original_transaction_id = tr.id) AS is_reversed,
       (SELECT rv.original_transaction_id FROM transaction_reversals rv WHERE rv.reversal_transaction_id = tr.id) AS reversal_of_transaction_id
     FROM transactions tr JOIN workers w ON w.id = tr.worker_id
+    WHERE tr.family_id = ?
     ORDER BY tr.created_at DESC LIMIT 80
-  `).all() as Array<TransactionRow & { worker_name: string }>;
-  const rewardState = getAdminRewardState();
+  `).all(context.familyId) as Array<TransactionRow & { worker_name: string }>;
+  const rewardState = getAdminRewardState(context);
 
   return {
     workers: refreshedWorkers.map((worker) => {
@@ -1897,7 +2128,7 @@ export function getAdminState() {
       const timer = timers.find((item) => item.worker_id === worker.id);
       return {
         ...publicWorker(db, worker),
-        activeTimer: publicTimer(db, timer),
+        activeTimer: publicTimer(db, context.familyId, timer),
         assignments: workerAssignments,
         pendingReviewCount:
           workerAssignments.filter((assignment) => assignment.status === "submitted").length

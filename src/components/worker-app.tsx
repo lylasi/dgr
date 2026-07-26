@@ -14,6 +14,7 @@ import {
   PenLine,
   Play,
   Send,
+  ShieldCheck,
   Sparkles,
   Star,
   TrendingDown,
@@ -48,7 +49,7 @@ type WorkerTab = "home" | "tasks" | "rewards" | "ledger" | "me";
 const statusInfo: Record<Assignment["status"], { label: string; className: string }> = {
   claimed: { label: "可以开始做啦", className: "bg-blue-100 text-blue-700" },
   in_progress: { label: "正在努力中", className: "bg-orange-100 text-orange-700" },
-  submitted: { label: "等管理员看看", className: "bg-purple-100 text-purple-700" },
+  submitted: { label: "等老板看看", className: "bg-purple-100 text-purple-700" },
   revision_requested: { label: "再改一改就更棒", className: "bg-amber-100 text-amber-800" },
   approved: { label: "奖励已到账", className: "bg-emerald-100 text-emerald-700" },
   rejected: { label: "本次没有通过", className: "bg-red-100 text-red-700" },
@@ -56,7 +57,7 @@ const statusInfo: Record<Assignment["status"], { label: string; className: strin
 };
 
 const rewardRequestStatusInfo: Record<RewardRequest["status"], { label: string; className: string }> = {
-  pending: { label: "等管理员审核", className: "bg-purple-100 text-purple-700" },
+  pending: { label: "等老板审核", className: "bg-purple-100 text-purple-700" },
   revision_requested: { label: "需要补充", className: "bg-amber-100 text-amber-800" },
   approved: { label: "奖励已到账", className: "bg-emerald-100 text-emerald-700" },
   rejected: { label: "本次未通过", className: "bg-red-100 text-red-700" },
@@ -67,12 +68,40 @@ function messageOf(error: unknown) {
   return error instanceof Error ? error.message : "操作失败，请再试一次。";
 }
 
+export function BossActingBanner({
+  bossDisplayName,
+  familyName,
+  workerName,
+  onReturn,
+}: {
+  bossDisplayName: string;
+  familyName: string;
+  workerName: string;
+  onReturn?: () => void;
+}) {
+  return (
+    <section className="mx-auto mb-4 flex w-[calc(100%-2rem)] max-w-3xl flex-wrap items-center justify-between gap-3 rounded-2xl border-2 border-amber-300 bg-amber-50 px-4 py-3 text-amber-900 shadow-sm" role="status">
+      <div className="flex min-w-0 items-center gap-2">
+        <ShieldCheck className="shrink-0" size={21} />
+        <p className="text-sm font-black leading-6">
+          {familyName}的{bossDisplayName}正在代 {workerName} 操作
+        </p>
+      </div>
+      <button className="secondary-button !min-h-10 text-sm" onClick={onReturn}>返回老板后台</button>
+    </section>
+  );
+}
+
 export function WorkerApp({
   onSwitch,
   onAuthorizationError,
+  actingBoss,
+  onReturnToBoss,
 }: {
   onSwitch: () => void;
   onAuthorizationError: (error: unknown) => boolean;
+  actingBoss?: { displayName: string; familyName: string };
+  onReturnToBoss?: () => Promise<void>;
 }) {
   const [state, setState] = useState<WorkerState | null>(null);
   const [tab, setTab] = useState<WorkerTab>("home");
@@ -153,6 +182,18 @@ export function WorkerApp({
     }
   }
 
+  async function returnToBoss() {
+    if (!onReturnToBoss) return;
+    setBusy(true);
+    try {
+      await onReturnToBoss();
+    } catch (error) {
+      if (!onAuthorizationError(error)) setToast({ message: messageOf(error), tone: "error" });
+    } finally {
+      setBusy(false);
+    }
+  }
+
   if (!state) return <LoadingScreen />;
 
   const nav = workerNavItems.map((item) => (
@@ -167,18 +208,26 @@ export function WorkerApp({
       {toast && <Toast {...toast} />}
       <AppHeader
         title={state.worker.name}
-        subtitle="今天也要开心地赚时间币"
+        subtitle={actingBoss ? `${actingBoss.displayName}正在陪同操作` : "今天也要开心地赚时间币"}
         avatar={state.worker.avatar}
         avatarUrl={state.worker.avatarUrl}
         theme={state.worker.theme}
         onSwitch={onSwitch}
       />
+      {actingBoss && (
+        <BossActingBanner
+          bossDisplayName={actingBoss.displayName}
+          familyName={actingBoss.familyName}
+          workerName={state.worker.name}
+          onReturn={() => void returnToBoss()}
+        />
+      )}
       <main className="page-enter mx-auto w-full max-w-3xl px-4 pb-8 sm:px-6">
         {tab === "home" && <WorkerHome state={state} mutate={mutate} busy={busy} onOpenTaskPicker={() => setShowTaskPicker(true)} onOpenRewardRequest={() => setShowRewardRequest(true)} onOpenTaskDetail={(assignment) => setDetailAssignmentId(assignment.id)} />}
         {tab === "tasks" && <TasksPanel state={state} mutate={mutate} busy={busy} onOpenRewardRequest={() => setShowRewardRequest(true)} onOpenTaskPicker={() => setShowTaskPicker(true)} onOpenTaskDetail={(assignment) => setDetailAssignmentId(assignment.id)} />}
         {tab === "rewards" && <RewardsPanel state={state} mutateReward={mutateReward} busy={busy} />}
         {tab === "ledger" && <LedgerPanel state={state} onOpenTaskDetail={(assignment) => setDetailAssignmentId(assignment.id)} />}
-        {tab === "me" && <WorkerMe state={state} onSwitch={onSwitch} />}
+        {tab === "me" && <WorkerMe state={state} onSwitch={onSwitch} actingBoss={actingBoss} onReturnToBoss={() => void returnToBoss()} />}
       </main>
       {state.activeTimer && (
         <StickyTimer
@@ -488,7 +537,7 @@ function RewardRequestDialog({
     const body = editingRequest
       ? { action, rewardRequestId: editingRequest.id, title, description, rewardSeconds: rewardMinutesNumber * MINUTE }
       : { action, title, description, rewardSeconds: rewardMinutesNumber * MINUTE };
-    const ok = await mutate(body, editingRequest ? "奖励申报已重新提交" : "奖励申报已提交，等管理员审核");
+    const ok = await mutate(body, editingRequest ? "奖励申报已重新提交" : "奖励申报已提交，等老板审核");
     if (ok) {
       resetForm();
       onClose();
@@ -515,7 +564,7 @@ function RewardRequestDialog({
           </div>
           <div className="min-w-0 flex-1">
             <h2 id="reward-request-title" className="text-xl font-black">自己申报奖励</h2>
-            <p className="mt-1 text-sm font-bold leading-6 text-purple-100">做了列表里没有的好事情？写下来交给管理员，审核通过才会入账。</p>
+            <p className="mt-1 text-sm font-bold leading-6 text-purple-100">做了列表里没有的好事情？写下来交给老板，审核通过才会入账。</p>
           </div>
           <button
             type="button"
@@ -542,7 +591,7 @@ function RewardRequestDialog({
         </label>
         <div className="flex gap-2">
           <button className="primary-button flex-1" type="submit" disabled={busy || !title.trim() || !validRewardMinutes}>
-            <Send className="mr-2 inline" size={18} />{editingRequest ? "重新提交审核" : "提交给管理员"}
+            <Send className="mr-2 inline" size={18} />{editingRequest ? "重新提交审核" : "提交给老板"}
           </button>
           {editingRequest && <button type="button" className="secondary-button" disabled={busy} onClick={resetForm}>取消修改</button>}
         </div>
@@ -564,7 +613,7 @@ function RewardRequestDialog({
                     </div>
                     <TimeCoin seconds={request.rewardSeconds} compact />
                   </div>
-                  {request.reviewNote && <p className="mt-2 text-sm font-semibold leading-6 text-slate-600">管理员说：{request.reviewNote}</p>}
+                  {request.reviewNote && <p className="mt-2 text-sm font-semibold leading-6 text-slate-600">老板说：{request.reviewNote}</p>}
                   {(canEdit || canCancel) && (
                     <div className="mt-2 flex gap-2">
                       {canEdit && <button type="button" className="secondary-button !min-h-10 !px-3 text-xs" disabled={busy} onClick={() => startRevision(request)}>修改后重交</button>}
@@ -638,7 +687,7 @@ function TasksPanel({
           <div className="grid h-11 w-11 shrink-0 place-items-center rounded-2xl bg-blue-100 text-blue-700"><ListChecks size={23} /></div>
           <div className="min-w-0 flex-1">
             <p className="font-black">{state.availableTasks.length > 0 ? `${state.availableTasks.length} 个任务可以参加` : "暂时没有新任务"}</p>
-            <p className="mt-0.5 truncate text-xs font-bold text-slate-500">{state.availableTasks.length > 0 ? state.availableTasks.slice(0, 3).map((task) => task.title).join(" · ") : "管理员发布后会出现在这里"}</p>
+            <p className="mt-0.5 truncate text-xs font-bold text-slate-500">{state.availableTasks.length > 0 ? state.availableTasks.slice(0, 3).map((task) => task.title).join(" · ") : "老板发布后会出现在这里"}</p>
           </div>
           {state.availableTasks.length > 0 && <span className="shrink-0 text-sm font-black text-purple-700">选择</span>}
         </button>
@@ -866,7 +915,7 @@ function AssignmentCard({
         </div>
         <button type="button" className="flex w-full items-center justify-between rounded-xl bg-slate-50 px-3 py-2 text-left text-xs font-black text-purple-700" onClick={onOpenDetail}><span>任务说明 · 奖励类型 · 时间记录</span><span>查看详情</span></button>
         {assignment.dueAt && <p className="text-xs font-bold text-slate-500">截止：{formatDateTime(assignment.dueAt)}</p>}
-        {assignment.status === "revision_requested" && assignment.reviewNote && <p className="rounded-xl bg-amber-50 px-3 py-2 text-sm font-bold text-amber-800">管理员说：{assignment.reviewNote}</p>}
+        {assignment.status === "revision_requested" && assignment.reviewNote && <p className="rounded-xl bg-amber-50 px-3 py-2 text-sm font-bold text-amber-800">老板说：{assignment.reviewNote}</p>}
         {canWork && (
           <>
             {assignment.timingMode !== "none" && (
@@ -877,7 +926,7 @@ function AssignmentCard({
               )
             )}
             <label><span className="label">完成说明</span><textarea className="field min-h-20" value={note} onChange={(event) => setNote(event.target.value)} placeholder="说说你完成了什么、学到了什么" maxLength={500} /></label>
-            <button className="primary-button w-full" disabled={busy || !note.trim() || Boolean(activeTimer && !isThisTimer)} onClick={async () => { const ok = await mutate({ action: "submit_task", assignmentId: assignment.id, note }, "任务已提交，等管理员看看吧"); if (ok) setNote(""); }}><Send className="mr-2 inline" size={18} />提交审核</button>
+            <button className="primary-button w-full" disabled={busy || !note.trim() || Boolean(activeTimer && !isThisTimer)} onClick={async () => { const ok = await mutate({ action: "submit_task", assignmentId: assignment.id, note }, "任务已提交，等老板看看吧"); if (ok) setNote(""); }}><Send className="mr-2 inline" size={18} />提交审核</button>
             {assignment.timingMode === "required" && <p className="text-center text-xs font-bold text-slate-500">最低要求 {formatDuration(assignment.minimumDurationSeconds || 0, false)} · {remainingRequirementSeconds && remainingRequirementSeconds > 0 ? `还差 ${formatDuration(remainingRequirementSeconds)}` : "已经达到"}</p>}
             <details className="rounded-2xl bg-slate-50 p-3">
               <summary className="min-h-11 cursor-pointer py-2 font-black text-slate-700">修改计时或取消任务</summary>
@@ -924,7 +973,7 @@ function AssignmentCard({
             </details>
           </>
         )}
-        {assignment.status === "submitted" && <p className="rounded-2xl bg-purple-50 p-3 text-center text-sm font-black text-purple-700">已经交给管理员啦，审核前不会计入余额。</p>}
+        {assignment.status === "submitted" && <p className="rounded-2xl bg-purple-50 p-3 text-center text-sm font-black text-purple-700">已经交给老板啦，审核前不会计入余额。</p>}
       </div>
     </div>
   );
@@ -1034,7 +1083,7 @@ function TaskDetailDialog({
 const rewardSourceLabels: Record<RewardItem["sourceType"], string> = {
   daily: "每日免费派发",
   task: "任务奖励",
-  admin_direct: "管理员直接发放",
+  admin_direct: "老板直接发放",
   achievement: "成就奖励",
   adjustment: "补发或纠错",
 };
@@ -1164,7 +1213,7 @@ function RewardsPanel({
           {state.availableRewardCount > 0 && <span className="rounded-full bg-purple-100 px-2.5 py-1 text-xs font-black text-purple-700">共 {state.availableRewardCount} 张</span>}
         </div>
         {availableGroups.length === 0 ? (
-          <EmptyState title="还没有可用券" text="每日派发、任务或管理员发放的券会出现在这里。" />
+          <EmptyState title="还没有可用券" text="每日派发、任务或老板发放的券会出现在这里。" />
         ) : (
           <div className="app-card divide-y divide-purple-50 overflow-hidden">
             {availableGroups.map((group) => <RewardGroupRow key={`${group.item.id}:${group.items.length}`} group={group} onClick={() => setRewardDetail(group)} />)}
@@ -1452,7 +1501,17 @@ function LedgerPanel({ state, onOpenTaskDetail }: { state: WorkerState; onOpenTa
   );
 }
 
-function WorkerMe({ state, onSwitch }: { state: WorkerState; onSwitch: () => void }) {
+function WorkerMe({
+  state,
+  onSwitch,
+  actingBoss,
+  onReturnToBoss,
+}: {
+  state: WorkerState;
+  onSwitch: () => void;
+  actingBoss?: { displayName: string; familyName: string };
+  onReturnToBoss?: () => void;
+}) {
   async function logout() {
     await api("/api/auth", { method: "POST", body: JSON.stringify({ action: "logout_current" }) });
     onSwitch();
@@ -1460,8 +1519,15 @@ function WorkerMe({ state, onSwitch }: { state: WorkerState; onSwitch: () => voi
   return (
     <div className="space-y-5">
       <section className="app-card flex flex-col items-center p-7 text-center"><Avatar avatar={state.worker.avatar} theme={state.worker.theme} imageUrl={state.worker.avatarUrl} size={84} /><h2 className="mt-4 text-2xl font-black">{state.worker.name}</h2><p className="mt-1 text-sm font-bold text-slate-500">我的时间小金库</p><div className="mt-4 rounded-2xl bg-purple-50 px-5 py-3 text-purple-700"><TimeCoin seconds={state.worker.balanceSeconds} /></div></section>
-      <section className="app-card p-5"><div className="flex items-start gap-3"><LockKeyhole className="mt-0.5 shrink-0 text-purple-600" /><div><h3 className="font-black">这台设备已记住登录</h3><p className="mt-1 text-sm font-semibold leading-6 text-slate-500">退出后会清除本机对这个角色的登录，下次需要重新输入 PIN。</p></div></div><button className="danger-button mt-4 w-full" onClick={logout}>退出这个角色</button></section>
-      <button className="secondary-button w-full" onClick={onSwitch}>切换到其他角色</button>
+      {actingBoss ? (
+        <section className="app-card border-2 border-amber-200 p-5">
+          <div className="flex items-start gap-3"><ShieldCheck className="mt-0.5 shrink-0 text-amber-600" /><div><h3 className="font-black">当前是老板代操作</h3><p className="mt-1 text-sm font-semibold leading-6 text-slate-500">真实操作者是{actingBoss.displayName}，操作会按代操作记录；这不会清除或冒用小朋友的设备授权。</p></div></div>
+          <button className="primary-button mt-4 w-full" onClick={onReturnToBoss}>返回老板后台</button>
+        </section>
+      ) : (
+        <section className="app-card p-5"><div className="flex items-start gap-3"><LockKeyhole className="mt-0.5 shrink-0 text-purple-600" /><div><h3 className="font-black">这台设备已记住登录</h3><p className="mt-1 text-sm font-semibold leading-6 text-slate-500">退出后会清除本机对这个角色的登录，下次需要重新输入 PIN。</p></div></div><button className="danger-button mt-4 w-full" onClick={logout}>退出这个角色</button></section>
+      )}
+      <button className="secondary-button w-full" onClick={onSwitch}>{actingBoss ? "切换到本家庭其他角色" : "切换到其他角色"}</button>
     </div>
   );
 }

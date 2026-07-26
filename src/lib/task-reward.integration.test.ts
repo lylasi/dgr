@@ -11,13 +11,13 @@ import {
   getWorkerState,
   reviewAssignment,
   submitAssignment,
-} from "@/lib/service";
+} from "@/lib/test-service-compat";
 import {
   createRewardDefinition,
   deleteRewardDefinition,
   setRewardSystemEnabled,
   updateRewardDefinition,
-} from "@/lib/reward-service";
+} from "@/lib/test-reward-service-compat";
 import { MINUTE } from "@/lib/time";
 
 const databasePath = path.join("/private/tmp", `pen-worker-task-reward-${process.pid}.db`);

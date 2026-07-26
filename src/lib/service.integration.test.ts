@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { resetConfigForTests } from "@/lib/config";
-import { closeDbForTests, getDb } from "@/lib/db";
+import { closeDbForTests, DEFAULT_FAMILY_ID, getDb } from "@/lib/db";
 import {
   adjustBalance,
   cancelAssignment,
@@ -28,7 +28,7 @@ import {
   submitRewardRequest,
   syncWorker,
   updateWorker,
-} from "@/lib/service";
+} from "@/lib/test-service-compat";
 import {
   cancelRewardItem,
   confirmPhysicalReward,
@@ -44,7 +44,7 @@ import {
   setRewardSystemEnabled,
   updateDailyCouponSetting,
   updateRewardDefinition,
-} from "@/lib/reward-service";
+} from "@/lib/test-reward-service-compat";
 import { HOUR, MINUTE } from "@/lib/time";
 
 const databasePath = path.join("/private/tmp", `pen-worker-test-${process.pid}.db`);
@@ -86,6 +86,12 @@ describe.sequential("SQLite business flow", () => {
     expect(first.worker.balanceSeconds).toBe(2 * HOUR);
     expect(second.worker.balanceSeconds).toBe(2 * HOUR);
     expect(second.transactions.filter((item) => item.type === "daily_reward")).toHaveLength(1);
+    expect(getDb().prepare("SELECT family_id FROM workers WHERE id = ?").get(workerId))
+      .toEqual({ family_id: DEFAULT_FAMILY_ID });
+    expect(getDb().prepare("SELECT id, name, status FROM families WHERE id = ?").get(DEFAULT_FAMILY_ID))
+      .toEqual({ id: DEFAULT_FAMILY_ID, name: "我的家庭", status: "active" });
+    expect(getDb().prepare("SELECT version FROM schema_migrations WHERE version = 9").get())
+      .toEqual({ version: 9 });
   });
 
   it("stores and replaces a compressed custom avatar", () => {

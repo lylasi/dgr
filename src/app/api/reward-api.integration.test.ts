@@ -2,16 +2,20 @@ import fs from "node:fs";
 import path from "node:path";
 import { NextRequest } from "next/server";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { POST as adminPost } from "@/app/api/admin/route";
+import { POST as adminPost } from "@/app/api/boss/route";
 import { GET as rewardImageGet } from "@/app/api/reward-image/[imageId]/route";
 import { POST as workerPost } from "@/app/api/worker/route";
 import type { AdminState, WorkerState } from "@/components/types";
+import {
+  authenticateBoss,
+  createBossAccount,
+  setBossFamilyMembership,
+} from "@/lib/account-service";
 import { resetConfigForTests } from "@/lib/config";
-import { closeDbForTests } from "@/lib/db";
+import { closeDbForTests, DEFAULT_FAMILY_ID } from "@/lib/db";
 import { getWorkerAuth } from "@/lib/service";
 import {
   createEmptySession,
-  currentAdminFingerprint,
   encodeSession,
   SESSION_COOKIE,
 } from "@/lib/session";
@@ -51,7 +55,7 @@ describe.sequential("reward API permissions and concurrency", () => {
   let fixedDefinitionId = "";
   let physicalDefinitionId = "";
 
-  beforeAll(() => {
+  beforeAll(async () => {
     process.env.ADMIN_PASSWORD = "reward-api-admin";
     process.env.SESSION_SECRET = "reward-api-session-secret-with-more-than-thirty-two-characters";
     process.env.DATABASE_PATH = databasePath;
@@ -60,9 +64,22 @@ describe.sequential("reward API permissions and concurrency", () => {
     closeDbForTests();
     for (const suffix of ["", "-wal", "-shm"]) fs.rmSync(`${databasePath}${suffix}`, { force: true });
 
+    const bossId = await createBossAccount({
+      username: "reward.api.boss",
+      displayName: "接口老板",
+      password: "reward-api-boss-password",
+      requestId: "reward-api-create-boss",
+    });
+    setBossFamilyMembership({
+      bossId,
+      familyId: DEFAULT_FAMILY_ID,
+      attached: true,
+      requestId: "reward-api-bind-boss",
+    });
+    const boss = await authenticateBoss("reward.api.boss", "reward-api-boss-password");
     const adminSession = createEmptySession();
-    adminSession.adminFingerprint = currentAdminFingerprint();
-    adminSession.active = { type: "admin" };
+    adminSession.bosses[bossId] = boss.authVersion;
+    adminSession.active = { type: "boss", bossId, familyId: DEFAULT_FAMILY_ID };
     adminCookie = sessionCookie(encodeSession(adminSession));
   });
 
@@ -72,14 +89,14 @@ describe.sequential("reward API permissions and concurrency", () => {
     resetConfigForTests();
   });
 
-  it("rejects reward administration without an administrator session", async () => {
+  it("rejects reward administration without a boss session", async () => {
     const response = await adminPost(request(
       "http://localhost/api/admin",
       null,
       { action: "set_reward_system_enabled", enabled: false, requestId: "api-no-admin" },
     ));
     expect(response.status).toBe(401);
-    expect(await bodyOf(response)).toMatchObject({ ok: false, error: { code: "ADMIN_LOGIN_REQUIRED" } });
+    expect(await bodyOf(response)).toMatchObject({ ok: false, error: { code: "BOSS_LOGIN_REQUIRED" } });
   });
 
   it("creates workers and the three API-facing reward resources", async () => {
@@ -143,12 +160,14 @@ describe.sequential("reward API permissions and concurrency", () => {
     physicalDefinitionId = physicalBody.data.rewardDefinitions.find((definition) => definition.name === "接口图书券")!.id;
 
     const firstSession = createEmptySession();
-    firstSession.workers[firstWorkerId] = getWorkerAuth(firstWorkerId).authVersion;
-    firstSession.active = { type: "worker", workerId: firstWorkerId };
+    const firstAuth = getWorkerAuth(firstWorkerId);
+    firstSession.workers[firstWorkerId] = firstAuth.authVersion;
+    firstSession.active = { type: "worker", workerId: firstWorkerId, familyId: firstAuth.familyId };
     firstWorkerCookie = sessionCookie(encodeSession(firstSession));
     const secondSession = createEmptySession();
-    secondSession.workers[secondWorkerId] = getWorkerAuth(secondWorkerId).authVersion;
-    secondSession.active = { type: "worker", workerId: secondWorkerId };
+    const secondAuth = getWorkerAuth(secondWorkerId);
+    secondSession.workers[secondWorkerId] = secondAuth.authVersion;
+    secondSession.active = { type: "worker", workerId: secondWorkerId, familyId: secondAuth.familyId };
     secondWorkerCookie = sessionCookie(encodeSession(secondSession));
   });
 
@@ -521,14 +540,18 @@ describe.sequential("reward API permissions and concurrency", () => {
     const imageUrl = uploadBody.data.rewardDefinitions.find((definition) => definition.id === physicalDefinitionId)!.imageUrl!;
     const imageId = imageUrl.split("/").at(-1)!;
     const first = await rewardImageGet(
-      new NextRequest(`http://localhost${imageUrl}`),
+      new NextRequest(`http://localhost${imageUrl}`, {
+        headers: { cookie: adminCookie },
+      }),
       { params: Promise.resolve({ imageId }) },
     );
     expect(first.status).toBe(200);
     expect(first.headers.get("content-type")).toBe("image/png");
     const etag = first.headers.get("etag")!;
     const cached = await rewardImageGet(
-      new NextRequest(`http://localhost${imageUrl}`, { headers: { "if-none-match": etag } }),
+      new NextRequest(`http://localhost${imageUrl}`, {
+        headers: { cookie: adminCookie, "if-none-match": etag },
+      }),
       { params: Promise.resolve({ imageId }) },
     );
     expect(cached.status).toBe(304);

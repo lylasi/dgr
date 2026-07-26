@@ -8,8 +8,12 @@ import {
   ChevronRight,
   Clock3,
   CircleHelp,
+  Copy,
+  DoorOpen,
   Gift,
   ImagePlus,
+  KeyRound,
+  Link2,
   MinusCircle,
   Pause,
   PenLine,
@@ -27,7 +31,8 @@ import {
   XCircle,
 } from "lucide-react";
 import { FormEvent, useCallback, useEffect, useState, type ChangeEvent } from "react";
-import { api, mutationId } from "@/components/api";
+import { api, copyText, mutationId } from "@/components/api";
+import { FamilyEntryQr } from "@/components/family-entry-qr";
 import {
   AdminRewardHistoryPanel,
   DailyCouponControls,
@@ -55,6 +60,7 @@ import type {
   AdminState,
   AdminWorker,
   Assignment,
+  BossBusinessState,
   RewardDefinition,
   RewardRequest,
   Task,
@@ -101,6 +107,16 @@ function messageOf(error: unknown) {
   return error instanceof Error ? error.message : "操作失败，请再试一次。";
 }
 
+function transactionActorLabel(item: Transaction) {
+  if (item.actorType === "boss" || item.actorType === "boss_as_worker") {
+    return item.actorName || "老板";
+  }
+  if (item.actorType === "worker") return item.actorName || "小朋友";
+  if (item.actorType === "system" || item.actor === "system") return "系统";
+  if (item.actorType === "legacy_admin" || item.actor === "admin") return "旧版管理员";
+  return item.actorName || "小朋友";
+}
+
 function timerAssignmentsFor(worker: Pick<AdminWorker, "assignments">) {
   return worker.assignments.filter((assignment) =>
     ["claimed", "in_progress", "revision_requested"].includes(assignment.status)
@@ -144,11 +160,17 @@ async function prepareAvatarImage(file: File): Promise<string> {
 export function AdminApp({
   onSwitch,
   onAuthorizationError,
+  onEnterWorker,
+  onSwitchFamily,
+  endpoint = "/api/boss",
 }: {
   onSwitch: () => void;
   onAuthorizationError: (error: unknown) => boolean;
+  onEnterWorker: (workerId: string) => Promise<void>;
+  onSwitchFamily: (familyId: string) => Promise<void>;
+  endpoint?: string;
 }) {
-  const [state, setState] = useState<AdminState | null>(null);
+  const [state, setState] = useState<BossBusinessState | null>(null);
   const [tab, setTab] = useState<AdminTab>("home");
   const [busy, setBusy] = useState(false);
   const [quickRewardWorkerId, setQuickRewardWorkerId] = useState<string | null>(null);
@@ -158,14 +180,14 @@ export function AdminApp({
 
   const load = useCallback(async (quiet = false) => {
     try {
-      const data = await api<AdminState>("/api/admin");
+      const data = await api<BossBusinessState>(endpoint);
       setState(data);
     } catch (error) {
       if (!onAuthorizationError(error) && !quiet) {
         setToast({ message: messageOf(error), tone: "error" });
       }
     }
-  }, [onAuthorizationError]);
+  }, [endpoint, onAuthorizationError]);
 
   useEffect(() => {
     void load();
@@ -189,7 +211,7 @@ export function AdminApp({
   async function mutate(body: Record<string, unknown>, success: string) {
     setBusy(true);
     try {
-      const data = await api<AdminState>("/api/admin", {
+      const data = await api<BossBusinessState>(endpoint, {
         method: "POST",
         body: JSON.stringify({ ...body, requestId: body.requestId || mutationId() }),
       });
@@ -199,6 +221,28 @@ export function AdminApp({
     } catch (error) {
       if (!onAuthorizationError(error)) setToast({ message: messageOf(error), tone: "error" });
       return false;
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function openWorker(workerId: string) {
+    setBusy(true);
+    try {
+      await onEnterWorker(workerId);
+    } catch (error) {
+      if (!onAuthorizationError(error)) setToast({ message: messageOf(error), tone: "error" });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function switchFamily(familyId: string) {
+    setBusy(true);
+    try {
+      await onSwitchFamily(familyId);
+    } catch (error) {
+      if (!onAuthorizationError(error)) setToast({ message: messageOf(error), tone: "error" });
     } finally {
       setBusy(false);
     }
@@ -217,18 +261,41 @@ export function AdminApp({
     <div className="min-h-screen pb-28">
       {toast && <Toast {...toast} />}
       <AppHeader
-        title="管理员控制台"
-        subtitle={`${state.workers.filter((worker) => worker.isActive).length} 位打工人 · ${state.reviews.length + state.rewardRequests.length} 项待审核`}
+        title={`${state.family.name} · 老板后台`}
+        subtitle={`${state.boss.displayName} · ${state.workers.filter((worker) => worker.isActive).length} 位小朋友 · ${state.reviews.length + state.rewardRequests.length} 项待审核`}
         onSwitch={onSwitch}
         admin
       />
       <main className="page-enter mx-auto w-full max-w-3xl px-4 pb-8 sm:px-6">
-        {tab === "home" && <AdminHome state={state} setTab={setTab} mutate={mutate} busy={busy} onQuickReward={(workerId) => setQuickRewardWorkerId(workerId || "")} onDirectReward={setRewardWorkerId} onQuickTimer={setQuickTimerWorkerId} />}
+        <section className="app-card mb-5 flex flex-wrap items-center justify-between gap-3 p-3">
+          <div className="min-w-0">
+            <p className="truncate text-sm font-black text-purple-800">当前家庭：{state.family.name}</p>
+            <p className="mt-0.5 text-xs font-semibold text-slate-500">真实操作者：{state.boss.displayName}</p>
+          </div>
+          {state.families.length > 1 && (
+            <select
+              className="field !min-h-10 !w-auto max-w-full py-1.5 text-sm"
+              aria-label="切换老板当前家庭"
+              value={state.family.id}
+              disabled={busy}
+              onChange={(event) => void switchFamily(event.target.value)}
+            >
+              {state.families.map((family) => <option key={family.familyId} value={family.familyId}>{family.familyName}</option>)}
+            </select>
+          )}
+        </section>
+        {tab === "home" && <AdminHome state={state} setTab={setTab} mutate={mutate} busy={busy} onQuickReward={(workerId) => setQuickRewardWorkerId(workerId || "")} onDirectReward={setRewardWorkerId} onQuickTimer={setQuickTimerWorkerId} onEnterWorker={(workerId) => void openWorker(workerId)} />}
         {tab === "publish" && <PublishPanel state={state} mutate={mutate} busy={busy} />}
         {tab === "reviews" && <ReviewPanel state={state} mutate={mutate} busy={busy} />}
-        {tab === "workers" && <WorkersPanel state={state} mutate={mutate} busy={busy} onQuickReward={setQuickRewardWorkerId} onDirectReward={setRewardWorkerId} />}
+        {tab === "workers" && <WorkersPanel state={state} mutate={mutate} busy={busy} onQuickReward={setQuickRewardWorkerId} onDirectReward={setRewardWorkerId} onEnterWorker={(workerId) => void openWorker(workerId)} />}
         {tab === "settings" && (
-          <AdminSettings state={state} mutate={mutate} busy={busy} onSwitch={onSwitch} />
+          <AdminSettings
+            state={state}
+            mutate={mutate}
+            busy={busy}
+            onSwitch={onSwitch}
+            onNotice={(message, tone) => setToast({ message, tone })}
+          />
         )}
       </main>
       <BottomNav items={nav} active={tab} onChange={setTab} />
@@ -283,6 +350,7 @@ function AdminHome({
   onQuickReward,
   onDirectReward,
   onQuickTimer,
+  onEnterWorker,
 }: {
   state: AdminState;
   setTab: (tab: AdminTab) => void;
@@ -291,6 +359,7 @@ function AdminHome({
   onQuickReward: (workerId?: string) => void;
   onDirectReward: (workerId: string) => void;
   onQuickTimer: (workerId: string) => void;
+  onEnterWorker: (workerId: string) => void;
 }) {
   const activeWorkers = state.workers.filter((worker) => worker.isActive);
   const running = activeWorkers.filter((worker) => worker.activeTimer);
@@ -366,7 +435,7 @@ function AdminHome({
                         <div className="mt-1 text-sm text-slate-600"><TimeCoin seconds={worker.balanceSeconds} compact /></div>
                       </div>
                     </div>
-                    <div className="grid shrink-0 grid-cols-3 gap-2">
+                    <div className="grid shrink-0 grid-cols-2 gap-2 sm:grid-cols-4">
                       <button
                         type="button"
                         className="primary-button !min-h-10 !rounded-xl !px-2 text-xs sm:!px-3"
@@ -395,6 +464,15 @@ function AdminHome({
                         onClick={() => onQuickTimer(worker.id)}
                       >
                         <Clock3 className="mr-1 inline" size={16} />计时
+                      </button>
+                      <button
+                        type="button"
+                        className="secondary-button !min-h-10 !rounded-xl !px-2 text-xs sm:!px-3"
+                        disabled={busy}
+                        aria-label={`进入 ${worker.name} 的小朋友页面`}
+                        onClick={() => onEnterWorker(worker.id)}
+                      >
+                        <DoorOpen className="mr-1 inline" size={16} />进入
                       </button>
                     </div>
                   </div>
@@ -1227,7 +1305,7 @@ function TimingHelpDialog({ onClose }: { onClose: () => void }) {
             <p className="mt-1 text-sm font-semibold leading-6 text-amber-900">提交前必须累计达到下方填写的最低分钟数，例如“至少计时 30 分钟”。计时可以暂停后继续，未达到要求时不能提交审核。</p>
           </div>
         </div>
-        <p className="mt-4 rounded-2xl bg-purple-50 px-4 py-3 text-sm font-black leading-6 text-purple-800">三种模式都不会自动发奖励；奖励时数以任务设定为准，完成后还要经过管理员审核。</p>
+        <p className="mt-4 rounded-2xl bg-purple-50 px-4 py-3 text-sm font-black leading-6 text-purple-800">三种模式都不会自动发奖励；奖励时数以任务设定为准，完成后还要经过老板审核。</p>
         <button type="button" className="primary-button mt-5 w-full" onClick={onClose}>知道了</button>
       </section>
     </div>
@@ -1352,7 +1430,7 @@ export function ReviewPanel({
 
       {state.reviews.length > 0 && (
         <section>
-          <SectionTitle title="管理员发布任务" text="按提交顺序排列，先看看最早提交的任务" />
+          <SectionTitle title="老板发布任务" text="按提交顺序排列，先看看最早提交的任务" />
           <div className="space-y-4">
             {[...state.reviews].sort((a, b) => (a.submittedAt || 0) - (b.submittedAt || 0)).map((assignment) => {
               const worker = state.workers.find((item) => item.id === assignment.workerId);
@@ -1438,7 +1516,7 @@ export function ReviewPanel({
                       disabled={busy}
                       onClick={() => {
                         if (window.confirm(`确定撤销“${assignment.title}”吗？本次不会发放奖励，之后仍可重新参加。`)) {
-                          void mutate({ action: "cancel_assignment", assignmentId: assignment.id, reason: "管理员撤销误操作任务" }, "任务已撤销");
+                          void mutate({ action: "cancel_assignment", assignmentId: assignment.id, reason: "老板撤销误操作任务" }, "任务已撤销");
                         }
                       }}
                     >
@@ -1519,12 +1597,14 @@ function WorkersPanel({
   busy,
   onQuickReward,
   onDirectReward,
+  onEnterWorker,
 }: {
   state: AdminState;
   mutate: (body: Record<string, unknown>, success: string) => Promise<boolean>;
   busy: boolean;
   onQuickReward: (workerId: string) => void;
   onDirectReward: (workerId: string) => void;
+  onEnterWorker: (workerId: string) => void;
 }) {
   const [name, setName] = useState("");
   const [pin, setPin] = useState("");
@@ -1549,7 +1629,7 @@ function WorkersPanel({
         <SectionTitle title="角色管理" text="每日奖励修改后不会追溯当天已经发放的时数" />
         {state.workers.length === 0 ? <EmptyState title="还没有打工人" text="点击下方按钮创建第一个角色。" /> : (
           <div className="space-y-4">
-            {state.workers.map((worker) => <WorkerManageCard key={worker.id} worker={worker} state={state} mutate={mutate} busy={busy} onQuickReward={onQuickReward} onDirectReward={onDirectReward} />)}
+            {state.workers.map((worker) => <WorkerManageCard key={worker.id} worker={worker} state={state} mutate={mutate} busy={busy} onQuickReward={onQuickReward} onDirectReward={onDirectReward} onEnterWorker={onEnterWorker} />)}
           </div>
         )}
       </section>
@@ -1615,6 +1695,7 @@ function WorkerManageCard({
   busy,
   onQuickReward,
   onDirectReward,
+  onEnterWorker,
 }: {
   worker: AdminWorker;
   state: AdminState;
@@ -1622,6 +1703,7 @@ function WorkerManageCard({
   busy: boolean;
   onQuickReward: (workerId: string) => void;
   onDirectReward: (workerId: string) => void;
+  onEnterWorker: (workerId: string) => void;
 }) {
   const [pin, setPin] = useState("");
   const [adjustMinutes, setAdjustMinutes] = useState("");
@@ -1711,6 +1793,11 @@ function WorkerManageCard({
           </button>
         ) : null}
       </div>
+      {worker.isActive && (
+        <button className="secondary-button mt-3 w-full" disabled={busy} onClick={() => onEnterWorker(worker.id)}>
+          <DoorOpen className="mr-1 inline" size={17} />进入 {worker.name} 的小朋友页面
+        </button>
+      )}
       <p className="mt-1.5 text-xs font-semibold text-slate-500">照片会在本机裁成正方形并压缩后保存到 SQLite。</p>
 
       {!worker.isActive && (
@@ -1891,7 +1978,7 @@ function AdminAssignmentControls({
         disabled={busy}
         onClick={() => {
           if (window.confirm(`确定撤销 ${assignment.title} 吗？本次不会发放奖励。`)) {
-            void mutate({ action: "cancel_assignment", assignmentId: assignment.id, reason: "管理员撤销误操作任务" }, "任务已撤销");
+            void mutate({ action: "cancel_assignment", assignmentId: assignment.id, reason: "老板撤销误操作任务" }, "任务已撤销");
           }
         }}
       >
@@ -1955,7 +2042,7 @@ export function AdminTransactionHistory({
           onClose={() => setSelectedItemId(null)}
           onReverse={async () => {
             if (!window.confirm(`确定撤销 ${selectedItem.workerName || "打工人"} 的“${selectedItem.title}”吗？将原额退回。`)) return;
-            const ok = await mutate({ action: "reverse_consumption", transactionId: selectedItem.id, reason: "管理员确认是误触消耗" }, "消耗已撤销，时数已原额退回");
+            const ok = await mutate({ action: "reverse_consumption", transactionId: selectedItem.id, reason: "老板确认是误触消耗" }, "消耗已撤销，时数已原额退回");
             if (ok) setSelectedItemId(null);
           }}
         />
@@ -2027,7 +2114,7 @@ function AdminTransactionDetailDialog({
         )}
 
         <div className="mt-2 space-y-1 rounded-xl bg-slate-50 px-3 py-2 text-xs font-semibold leading-5 text-slate-600">
-          <p><strong>操作来源：</strong>{item.actor === "admin" ? "管理员" : item.actor === "system" ? "系统" : "打工人"}</p>
+          <p><strong>操作来源：</strong>{transactionActorLabel(item)}</p>
           {relatedReversal && <p><strong>{item.reversalOfTransactionId ? "原始记录" : "撤销记录"}：</strong>{relatedReversal.title} · {formatDateTime(relatedReversal.createdAt)}</p>}
         </div>
 
@@ -2042,13 +2129,80 @@ function AdminSettings({
   mutate,
   busy,
   onSwitch,
+  onNotice,
 }: {
-  state: AdminState;
+  state: BossBusinessState;
   mutate: (body: Record<string, unknown>, success: string) => Promise<boolean>;
   busy: boolean;
   onSwitch: () => void;
+  onNotice: (message: string, tone: "success" | "error") => void;
 }) {
   const [activityName, setActivityName] = useState("");
+  const [bossDefaultDisplayName, setBossDefaultDisplayName] = useState(state.boss.defaultDisplayName);
+  const [bossFamilyDisplayName, setBossFamilyDisplayName] = useState(state.boss.familyDisplayNameOverride || "");
+  const [familyName, setFamilyName] = useState(state.family.name);
+  const [origin, setOrigin] = useState("");
+  const [copied, setCopied] = useState(false);
+  const [currentPassword, setCurrentPassword] = useState("");
+  const [newPassword, setNewPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const [passwordBusy, setPasswordBusy] = useState(false);
+
+  useEffect(() => {
+    setBossDefaultDisplayName(state.boss.defaultDisplayName);
+  }, [state.boss.defaultDisplayName]);
+
+  useEffect(() => {
+    setBossFamilyDisplayName(state.boss.familyDisplayNameOverride || "");
+  }, [state.boss.familyDisplayNameOverride]);
+
+  useEffect(() => {
+    setFamilyName(state.family.name);
+  }, [state.family.name]);
+
+  useEffect(() => {
+    setOrigin(window.location.origin);
+  }, []);
+
+  const familyEntryUrl = `${origin}/family/${state.family.entryCode}`;
+
+  async function copyFamilyEntry() {
+    try {
+      await copyText(familyEntryUrl);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 2000);
+    } catch (error) {
+      window.alert(messageOf(error));
+    }
+  }
+
+  async function changePassword(event: FormEvent) {
+    event.preventDefault();
+    if (newPassword !== confirmPassword) {
+      onNotice("两次输入的新密码不一致。", "error");
+      return;
+    }
+    setPasswordBusy(true);
+    try {
+      await api("/api/auth", {
+        method: "POST",
+        body: JSON.stringify({
+          action: "boss_change_password",
+          currentPassword,
+          newPassword,
+          requestId: mutationId(),
+        }),
+      });
+      setCurrentPassword("");
+      setNewPassword("");
+      setConfirmPassword("");
+      onNotice("密码已修改，其他设备上的老板登录已失效。", "success");
+    } catch (error) {
+      onNotice(messageOf(error), "error");
+    } finally {
+      setPasswordBusy(false);
+    }
+  }
 
   async function logout() {
     await api("/api/auth", { method: "POST", body: JSON.stringify({ action: "logout_current" }) });
@@ -2057,6 +2211,96 @@ function AdminSettings({
 
   return (
     <div className="space-y-6">
+      <section>
+        <SectionTitle title="老板账号资料" text="默认名称用于未单独设置昵称的家庭；家庭昵称只影响当前家庭。" />
+        <div className="app-card p-4 sm:p-5">
+          <label>
+            <span className="label">账号默认名称</span>
+            <div className="flex gap-2">
+              <input className="field" value={bossDefaultDisplayName} onChange={(event) => setBossDefaultDisplayName(event.target.value)} maxLength={60} />
+              <button
+                className="primary-button shrink-0 !px-4"
+                disabled={busy || !bossDefaultDisplayName.trim() || bossDefaultDisplayName.trim() === state.boss.defaultDisplayName}
+                onClick={() => void mutate({ action: "update_boss_display_name", displayName: bossDefaultDisplayName }, "账号默认名称已更新")}
+              >保存</button>
+            </div>
+          </label>
+          <label className="mt-4 block border-t border-slate-100 pt-4">
+            <span className="label">在“{state.family.name}”显示为</span>
+            <div className="flex gap-2">
+              <input
+                className="field"
+                value={bossFamilyDisplayName}
+                onChange={(event) => setBossFamilyDisplayName(event.target.value)}
+                maxLength={60}
+                placeholder={`留空则使用 ${state.boss.defaultDisplayName}`}
+              />
+              <button
+                className="primary-button shrink-0 !px-4"
+                disabled={busy || (bossFamilyDisplayName.trim() || null) === state.boss.familyDisplayNameOverride}
+                onClick={() => void mutate({
+                  action: "update_boss_family_display_name",
+                  displayName: bossFamilyDisplayName.trim() || null,
+                }, bossFamilyDisplayName.trim() ? "当前家庭昵称已更新" : "已恢复账号默认名称")}
+              >保存</button>
+            </div>
+          </label>
+          <p className="mt-2 text-xs font-semibold text-slate-500">
+            当前家庭实际显示为“{state.boss.displayName}”；登录名 {state.boss.username} 仍由系统管理员维护。历史审计保留操作当时的名称。
+          </p>
+
+          <form className="mt-5 border-t border-slate-100 pt-4" onSubmit={changePassword}>
+            <div className="flex items-center gap-2 font-black text-slate-800"><KeyRound size={18} className="text-purple-600" />修改登录密码</div>
+            <div className="mt-3 grid gap-3 sm:grid-cols-2">
+              <label className="sm:col-span-2"><span className="label">当前密码</span><input className="field" type="password" value={currentPassword} onChange={(event) => setCurrentPassword(event.target.value)} maxLength={200} autoComplete="current-password" required /></label>
+              <label><span className="label">新密码（至少 8 位）</span><input className="field" type="password" value={newPassword} onChange={(event) => setNewPassword(event.target.value)} minLength={8} maxLength={200} autoComplete="new-password" required /></label>
+              <label><span className="label">再次输入新密码</span><input className="field" type="password" value={confirmPassword} onChange={(event) => setConfirmPassword(event.target.value)} minLength={8} maxLength={200} autoComplete="new-password" required /></label>
+            </div>
+            <button
+              className="secondary-button mt-3 w-full"
+              disabled={busy || passwordBusy || !currentPassword || newPassword.length < 8 || newPassword !== confirmPassword}
+            >{passwordBusy ? "正在修改…" : "修改密码"}</button>
+            <p className="mt-2 text-xs font-semibold text-slate-500">修改成功后当前设备保持登录，其他设备需要使用新密码重新登录。</p>
+          </form>
+        </div>
+      </section>
+
+      <section>
+        <SectionTitle title="家庭资料与入口" text="家庭名称会显示在角色页；轮换入口后，之前分享的链接会立即失效。" />
+        <div className="app-card p-4 sm:p-5">
+          <label>
+            <span className="label">家庭名称</span>
+            <div className="flex gap-2">
+              <input className="field" value={familyName} onChange={(event) => setFamilyName(event.target.value)} maxLength={60} />
+              <button
+                className="primary-button shrink-0 !px-4"
+                disabled={busy || !familyName.trim() || familyName.trim() === state.family.name}
+                onClick={() => void mutate({ action: "update_family_name", name: familyName }, "家庭名称已更新")}
+              >保存</button>
+            </div>
+          </label>
+          <div className="mt-4 rounded-2xl bg-purple-50 p-3">
+            <div className="flex items-center gap-2 font-black text-purple-800"><Link2 size={18} />当前家庭入口</div>
+            <p className="mt-2 break-all text-xs font-semibold leading-5 text-purple-700">{familyEntryUrl || `/family/${state.family.entryCode}`}</p>
+            {origin && <FamilyEntryQr url={familyEntryUrl} familyName={state.family.name} />}
+            <div className="mt-3 grid grid-cols-2 gap-2">
+              <button className="secondary-button !min-h-10 text-sm" disabled={!origin} onClick={() => void copyFamilyEntry()}>
+                <Copy className="mr-1 inline" size={16} />{copied ? "已复制" : "复制入口"}
+              </button>
+              <button
+                className="secondary-button !min-h-10 text-sm"
+                disabled={busy}
+                onClick={() => {
+                  if (window.confirm("轮换后，所有旧家庭链接会立即失效，需要把新链接重新发给小朋友。确定继续吗？")) {
+                    void mutate({ action: "rotate_family_entry_code" }, "家庭入口已轮换，请重新分享新链接");
+                  }
+                }}
+              ><RefreshCw className="mr-1 inline" size={16} />轮换入口</button>
+            </div>
+          </div>
+        </div>
+      </section>
+
       <section>
         <RewardSettingsPanel state={state} mutate={mutate} busy={busy} />
       </section>
@@ -2083,8 +2327,8 @@ function AdminSettings({
       </section>
 
       <section className="app-card p-5">
-        <div className="flex items-start gap-3"><AlertCircle className="mt-0.5 shrink-0 text-amber-600" /><p className="text-sm font-semibold leading-6 text-slate-600">管理员密码来自服务器配置文件。修改 <code className="rounded bg-slate-100 px-1">ADMIN_PASSWORD</code> 并重启后，旧管理员登录会自动失效。</p></div>
-        <button className="danger-button mt-4 w-full" onClick={logout}>退出管理员</button>
+        <div className="flex items-start gap-3"><AlertCircle className="mt-0.5 shrink-0 text-amber-600" /><p className="text-sm font-semibold leading-6 text-slate-600">你正在使用正式老板账号管理当前家庭。切换家庭会重新校验账号状态和家庭绑定。</p></div>
+        <button className="danger-button mt-4 w-full" onClick={logout}>退出老板账号</button>
       </section>
     </div>
   );

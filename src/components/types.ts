@@ -1,7 +1,12 @@
-export type Identity = { type: "admin" } | { type: "worker"; workerId: string };
+export type Identity =
+  | { type: "system_admin" }
+  | { type: "boss"; bossId: string; familyId: string }
+  | { type: "worker"; workerId: string; familyId: string }
+  | { type: "boss_as_worker"; bossId: string; workerId: string; familyId: string };
 
 export type WorkerPublic = {
   id: string;
+  familyId: string;
   name: string;
   avatar: string;
   theme: string;
@@ -224,6 +229,10 @@ export type Transaction = {
   amountSeconds: number;
   balanceAfterSeconds: number;
   actor: string;
+  actorType?: "legacy_admin" | "boss" | "boss_as_worker" | "worker" | "system";
+  actorId?: string | null;
+  actorName?: string | null;
+  actingForWorkerId?: string | null;
   reason: string | null;
   rewardItemId: string | null;
   assignmentId: string | null;
@@ -279,8 +288,84 @@ export type AdminState = {
   todayDailyCouponGrants: Record<string, DailyCouponGrant>;
 };
 
+export type BossMembership = {
+  familyId: string;
+  familyName: string;
+  familyStatus: "active" | "inactive";
+  familyTimezone: string;
+  displayName: string;
+  displayNameOverride: string | null;
+};
+
+export type BossSessionSummary = {
+  id: string;
+  username: string;
+  displayName: string;
+  authVersion: number;
+  families: BossMembership[];
+};
+
+export type FamilySummary = {
+  id: string;
+  name: string;
+  timezone: string;
+};
+
+export type BossBusinessState = AdminState & {
+  boss: {
+    id: string;
+    username: string;
+    displayName: string;
+    defaultDisplayName: string;
+    familyDisplayNameOverride: string | null;
+  };
+  family: FamilySummary & { entryCode: string };
+  families: BossMembership[];
+  businessAccess: "family_business";
+};
+
+export type SystemFamily = FamilySummary & {
+  status: "active" | "inactive";
+  entryCode: string;
+  bossCount: number;
+  workerCount: number;
+  createdAt: number;
+  updatedAt: number;
+};
+
+export type SystemBoss = {
+  id: string;
+  username: string;
+  displayName: string;
+  authVersion: number;
+  isActive: boolean;
+  families: BossMembership[];
+  createdAt: number;
+  updatedAt: number;
+};
+
+export type SystemAuditLog = {
+  id: string;
+  actor: "system_admin";
+  action: string;
+  targetType: string;
+  targetId: string | null;
+  detail: string | null;
+  createdAt: number;
+};
+
+export type SystemManagementState = {
+  families: SystemFamily[];
+  bosses: SystemBoss[];
+  auditLogs: SystemAuditLog[];
+};
+
 export type BootstrapState = {
+  family: FamilySummary;
   workers: WorkerPublic[];
+  bosses: BossSessionSummary[];
+  systemAdminAuthorized: boolean;
+  /** Temporary response compatibility while already-open clients are upgraded. */
   adminAuthorized: boolean;
   activeIdentity: Identity | null;
 };
