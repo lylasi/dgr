@@ -19,6 +19,7 @@ type Envelope<T> =
   | { ok: false; error: { code: string; message: string } };
 
 type SystemState = {
+  settings: { publicFamilyDirectoryEnabled: boolean };
   families: Array<{ id: string; name: string; status: "active" | "inactive"; entryCode: string }>;
   bosses: Array<{
     id: string;
@@ -198,6 +199,50 @@ describe.sequential("system administrator and boss APIs", () => {
     const stateBody = await bodyOf<SystemState>(state);
     expect(stateBody.ok && stateBody.data.bosses.find((boss) => boss.id === bossId)?.families)
       .toHaveLength(2);
+  });
+
+  it("uses the root page as a public family directory and lets the system administrator hide it", async () => {
+    const publicRoot = await bootstrapGet(request("GET", "/api/bootstrap"));
+    expect(await bodyOf(publicRoot)).toMatchObject({
+      ok: true,
+      data: {
+        family: null,
+        workers: [],
+        publicFamilyDirectoryEnabled: true,
+        publicFamilies: expect.arrayContaining([
+          { id: firstFamilyId, name: "接口家庭一", entryCode: firstEntryCode },
+          { id: secondFamilyId, name: "接口家庭二", entryCode: secondEntryCode },
+        ]),
+      },
+    });
+
+    const hidden = await systemPost(request("POST", "/api/system", systemCookie, {
+      action: "set_public_family_directory",
+      enabled: false,
+      requestId: "account-api-hide-family-directory",
+    }));
+    expect(await bodyOf<SystemState>(hidden)).toMatchObject({
+      ok: true,
+      data: { settings: { publicFamilyDirectoryEnabled: false } },
+    });
+    expect(await bodyOf(await bootstrapGet(request("GET", "/api/bootstrap"))))
+      .toMatchObject({
+        ok: true,
+        data: {
+          family: null,
+          workers: [],
+          publicFamilyDirectoryEnabled: false,
+          publicFamilies: [],
+        },
+      });
+    expect((await bootstrapGet(request("GET", `/api/bootstrap?entryCode=${firstEntryCode}`))).status)
+      .toBe(200);
+
+    await systemPost(request("POST", "/api/system", systemCookie, {
+      action: "set_public_family_directory",
+      enabled: true,
+      requestId: "account-api-show-family-directory",
+    }));
   });
 
   it("requires a family choice for a multi-family boss and rejects an unbound family", async () => {

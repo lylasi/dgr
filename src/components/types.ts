@@ -355,13 +355,24 @@ export type SystemAuditLog = {
 };
 
 export type SystemManagementState = {
+  settings: {
+    publicFamilyDirectoryEnabled: boolean;
+  };
   families: SystemFamily[];
   bosses: SystemBoss[];
   auditLogs: SystemAuditLog[];
 };
 
+export type PublicFamilyDirectoryEntry = {
+  id: string;
+  name: string;
+  entryCode: string;
+};
+
 export type BootstrapState = {
-  family: FamilySummary;
+  family: FamilySummary | null;
+  publicFamilyDirectoryEnabled: boolean;
+  publicFamilies: PublicFamilyDirectoryEntry[];
   workers: WorkerPublic[];
   bosses: BossSessionSummary[];
   systemAdminAuthorized: boolean;

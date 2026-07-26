@@ -2,8 +2,11 @@
 
 import {
   BriefcaseBusiness,
+  Building2,
+  ChevronRight,
   Eye,
   EyeOff,
+  Link2,
   LockKeyhole,
   ShieldCheck,
   Sparkles,
@@ -17,6 +20,7 @@ import type {
   BossMembership,
   BossSessionSummary,
   Identity,
+  PublicFamilyDirectoryEntry,
   WorkerPublic,
 } from "@/components/types";
 
@@ -57,17 +61,19 @@ export function LoginScreen({
   const [error, setError] = useState("");
 
   const familyBosses = useMemo(
-    () => bootstrap.bosses.filter((boss) => boss.families.some((family) => family.familyId === bootstrap.family.id)),
-    [bootstrap.bosses, bootstrap.family.id],
+    () => bootstrap.family
+      ? bootstrap.bosses.filter((boss) => boss.families.some((family) => family.familyId === bootstrap.family?.id))
+      : [],
+    [bootstrap.bosses, bootstrap.family],
   );
   const activeBoss = useMemo(() => {
     const active = bootstrap.activeIdentity;
     if (
       (active?.type !== "boss" && active?.type !== "boss_as_worker")
-      || active.familyId !== bootstrap.family.id
+      || active.familyId !== bootstrap.family?.id
     ) return null;
     return familyBosses.find((boss) => boss.id === active.bossId) || null;
-  }, [bootstrap.activeIdentity, bootstrap.family.id, familyBosses]);
+  }, [bootstrap.activeIdentity, bootstrap.family, familyBosses]);
 
   function clearForm() {
     setTarget(null);
@@ -97,6 +103,7 @@ export function LoginScreen({
   }
 
   async function enterAsBoss(boss: BossSessionSummary, worker: WorkerPublic) {
+    if (!bootstrap.family) return;
     setBusy(true);
     setError("");
     try {
@@ -147,9 +154,9 @@ export function LoginScreen({
   }
 
   async function openRememberedBoss(boss: BossSessionSummary) {
-    const currentMembership = boss.families.find((family) => family.familyId === bootstrap.family.id);
+    const currentMembership = boss.families.find((family) => family.familyId === bootstrap.family?.id);
     if (entryCode) {
-      if (!currentMembership) {
+      if (!currentMembership || !bootstrap.family) {
         setError(`${boss.displayName}没有管理当前家庭的权限。`);
         return;
       }
@@ -182,7 +189,7 @@ export function LoginScreen({
             action: "boss_login",
             username,
             password,
-            ...(entryCode ? { familyId: bootstrap.family.id } : {}),
+            ...(entryCode && bootstrap.family ? { familyId: bootstrap.family.id } : {}),
           }),
         });
         if (result.activeIdentity) {
@@ -289,6 +296,19 @@ export function LoginScreen({
     );
   }
 
+  if (!bootstrap.family) {
+    return (
+      <PublicFamilyDirectory
+        enabled={bootstrap.publicFamilyDirectoryEnabled}
+        families={bootstrap.publicFamilies}
+        systemAdminAuthorized={bootstrap.systemAdminAuthorized}
+        busy={busy}
+        onSystemAdmin={() => void selectSystemAdmin()}
+      />
+    );
+  }
+  const currentFamily = bootstrap.family;
+
   return (
     <main className="min-h-screen px-4 py-8 sm:py-12">
       <div className="mx-auto max-w-3xl">
@@ -296,7 +316,7 @@ export function LoginScreen({
           <PencilMascot />
           <div className="pill -mt-1 bg-amber-100 text-amber-800"><Sparkles size={15} />时间也能存进小金库</div>
           <h1 className="mt-3 text-3xl font-black tracking-tight sm:text-4xl">PEN子打工人</h1>
-          <p className="mt-2 text-base font-black text-purple-800">{bootstrap.family.name}</p>
+          <p className="mt-2 text-base font-black text-purple-800">{currentFamily.name}</p>
           <p className="mt-1 text-sm font-bold text-slate-500">今天想用哪个角色开始？</p>
         </div>
 
@@ -323,7 +343,7 @@ export function LoginScreen({
           {bootstrap.bosses.length > 0 && (
             <div className="grid gap-3 sm:grid-cols-2">
               {bootstrap.bosses.map((boss) => {
-                const currentMembership = boss.families.find((family) => family.familyId === bootstrap.family.id);
+                const currentMembership = boss.families.find((family) => family.familyId === currentFamily.id);
                 return (
                   <button key={boss.id} className="app-card flex min-h-16 items-center gap-3 px-4 text-left" disabled={busy} onClick={() => void openRememberedBoss(boss)}>
                     <div className="grid h-11 w-11 shrink-0 place-items-center rounded-2xl bg-purple-100 text-purple-700"><BriefcaseBusiness size={23} /></div>
@@ -347,6 +367,141 @@ export function LoginScreen({
         </div>
       </div>
     </main>
+  );
+}
+
+export function PublicFamilyDirectory({
+  enabled,
+  families,
+  systemAdminAuthorized,
+  busy,
+  onSystemAdmin,
+}: {
+  enabled: boolean;
+  families: PublicFamilyDirectoryEntry[];
+  systemAdminAuthorized: boolean;
+  busy: boolean;
+  onSystemAdmin: () => void;
+}) {
+  return (
+    <main className="min-h-screen px-4 py-8 sm:py-12">
+      <div className="mx-auto max-w-3xl">
+        <div className="flex flex-col items-center text-center">
+          <PencilMascot />
+          <div className="pill -mt-1 bg-amber-100 text-amber-800"><Sparkles size={15} />时间也能存进小金库</div>
+          <h1 className="mt-3 text-3xl font-black tracking-tight sm:text-4xl">PEN子打工人</h1>
+          <p className="mt-2 text-sm font-bold text-slate-500">
+            {enabled ? "请选择要进入的家庭" : "家庭列表暂未公开"}
+          </p>
+        </div>
+
+        <FamilyEntryAddressForm />
+
+        {enabled ? (
+          families.length > 0 ? (
+            <div className="mt-7 grid gap-3 sm:grid-cols-2">
+              {families.map((family) => (
+                <a
+                  key={family.id}
+                  className="app-card flex min-h-24 items-center gap-4 px-5 py-4 transition hover:-translate-y-1"
+                  href={`/family/${encodeURIComponent(family.entryCode)}`}
+                >
+                  <div className="grid h-14 w-14 shrink-0 place-items-center rounded-2xl bg-purple-100 text-purple-700">
+                    <Building2 size={27} />
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <strong className="block truncate text-lg">{family.name}</strong>
+                    <span className="mt-1 block text-xs font-bold text-slate-500">进入后再选择老板或小朋友</span>
+                  </div>
+                  <ChevronRight className="shrink-0 text-purple-500" size={22} />
+                </a>
+              ))}
+            </div>
+          ) : (
+            <p className="app-card mx-auto mt-7 max-w-md px-5 py-6 text-center text-sm font-bold text-slate-600">
+              目前还没有启用中的家庭。
+            </p>
+          )
+        ) : (
+          <div className="app-card mx-auto mt-7 max-w-md px-5 py-6 text-center">
+            <LockKeyhole className="mx-auto text-purple-600" size={32} />
+            <p className="mt-3 font-black text-slate-800">请使用家庭专属入口</p>
+            <p className="mt-2 text-sm font-semibold leading-6 text-slate-500">请向家庭老板获取入口链接或二维码。</p>
+          </div>
+        )}
+
+        <div className="mt-10 border-t border-slate-200 pt-5 text-center">
+          <button className="min-h-11 px-3 text-xs font-bold text-slate-400 hover:text-purple-700" onClick={onSystemAdmin} disabled={busy}>
+            <UsersRound className="mr-1 inline" size={14} />系统维护入口{systemAdminAuthorized ? "（本机已登录）" : ""}
+          </button>
+        </div>
+      </div>
+    </main>
+  );
+}
+
+const FAMILY_ENTRY_CODE_PATTERN = /^[A-Za-z0-9_-]{16,100}$/;
+
+export function familyEntryPathFromInput(input: string): string | null {
+  const value = input.trim();
+  if (!value) return null;
+  const candidate = /^(?:localhost|[\w.-]+)(?::\d+)?\/family\//i.test(value)
+    ? `https://${value}`
+    : value;
+  try {
+    const parsed = new URL(candidate, "https://family-entry.local/");
+    const match = parsed.pathname.match(/^\/family\/([^/]+)\/?$/);
+    if (match) {
+      const entryCode = decodeURIComponent(match[1]);
+      return FAMILY_ENTRY_CODE_PATTERN.test(entryCode)
+        ? `/family/${encodeURIComponent(entryCode)}`
+        : null;
+    }
+  } catch {
+    return null;
+  }
+  return FAMILY_ENTRY_CODE_PATTERN.test(value)
+    ? `/family/${encodeURIComponent(value)}`
+    : null;
+}
+
+export function FamilyEntryAddressForm() {
+  const [value, setValue] = useState("");
+  const [error, setError] = useState("");
+
+  function submit(event: FormEvent) {
+    event.preventDefault();
+    const path = familyEntryPathFromInput(value);
+    if (!path) {
+      setError("请输入正确的家庭链接或入口码。");
+      return;
+    }
+    setError("");
+    window.location.assign(path);
+  }
+
+  return (
+    <form className="app-card mx-auto mt-6 max-w-xl p-4 sm:p-5" onSubmit={submit}>
+      <label className="block" htmlFor="family-entry-address">
+        <span className="flex items-center gap-2 text-sm font-black text-slate-700"><Link2 size={17} />已有家庭入口</span>
+        <span className="mt-1 block text-xs font-semibold leading-5 text-slate-500">粘贴完整家庭地址，也可以直接输入入口码。</span>
+      </label>
+      <div className="mt-3 flex flex-col gap-2 sm:flex-row">
+        <input
+          id="family-entry-address"
+          className="field min-w-0 flex-1"
+          value={value}
+          onChange={(event) => { setValue(event.target.value); setError(""); }}
+          placeholder="家庭链接或入口码"
+          autoCapitalize="none"
+          autoCorrect="off"
+          spellCheck={false}
+          required
+        />
+        <button className="primary-button shrink-0 sm:!px-5" type="submit">直接进入</button>
+      </div>
+      {error && <ErrorMessage message={error} />}
+    </form>
   );
 }
 

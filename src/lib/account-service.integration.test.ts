@@ -8,10 +8,13 @@ import {
   changeBossPassword,
   createBossAccount,
   createFamily,
+  getActiveFamilyByEntryCode,
   getAuthorizedBossContext,
+  getPublicFamilyDirectoryState,
   getSystemManagementState,
   listBossMemberships,
   setBossFamilyMembership,
+  setPublicFamilyDirectory,
   updateBossAccount,
   updateBossDisplayName,
   updateBossFamilyDisplayName,
@@ -83,6 +86,41 @@ describe.sequential("family and boss account service", () => {
     `).get("account-create-family-one")).toEqual({ count: 1 });
     expect(db.prepare("SELECT version FROM schema_migrations WHERE version = 10").get())
       .toEqual({ version: 10 });
+    expect(db.prepare("SELECT version FROM schema_migrations WHERE version = 13").get())
+      .toEqual({ version: 13 });
+  });
+
+  it("publishes active families by default and hides only their discovery when disabled", () => {
+    const db = getDb();
+    const firstEntryCode = (db.prepare("SELECT entry_code FROM families WHERE id = ?")
+      .get(firstFamilyId) as { entry_code: string }).entry_code;
+    expect(getPublicFamilyDirectoryState()).toMatchObject({
+      enabled: true,
+      families: expect.arrayContaining([
+        expect.objectContaining({ id: firstFamilyId, name: "测试一号家庭", entryCode: firstEntryCode }),
+        expect.objectContaining({ id: secondFamilyId, name: "测试二号家庭" }),
+      ]),
+    });
+
+    setPublicFamilyDirectory({
+      enabled: false,
+      requestId: "account-hide-public-family-directory",
+    });
+    expect(getPublicFamilyDirectoryState()).toEqual({ enabled: false, families: [] });
+    expect(getActiveFamilyByEntryCode(firstEntryCode)).toMatchObject({
+      id: firstFamilyId,
+      name: "测试一号家庭",
+    });
+    expect(getSystemManagementState().settings.publicFamilyDirectoryEnabled).toBe(false);
+    expect(db.prepare("SELECT action FROM system_audit_logs WHERE request_id = ?")
+      .get("account-hide-public-family-directory"))
+      .toEqual({ action: "public_family_directory_disabled" });
+
+    setPublicFamilyDirectory({
+      enabled: true,
+      requestId: "account-show-public-family-directory",
+    });
+    expect(getPublicFamilyDirectoryState().enabled).toBe(true);
   });
 
   it("creates a case-insensitive unique boss and binds multiple families", async () => {
@@ -303,6 +341,7 @@ describe.sequential("family and boss account service", () => {
     expect(getAuthorizedBossContext(bossId, currentBossVersion, secondFamilyId)).toBeNull();
     expect(workerAuthorizationValid(workerId, 1, secondFamilyId)).toBe(false);
     expect(listPublicWorkers(secondFamilyId).some((worker) => worker.id === workerId)).toBe(false);
+    expect(getPublicFamilyDirectoryState().families.some((family) => family.id === secondFamilyId)).toBe(false);
     await expect(authenticateWorker(workerId, "2468"))
       .rejects.toMatchObject({ code: "FAMILY_DISABLED", status: 403 });
 
@@ -313,6 +352,7 @@ describe.sequential("family and boss account service", () => {
     });
     expect(getAuthorizedBossContext(bossId, currentBossVersion, secondFamilyId)).not.toBeNull();
     expect(workerAuthorizationValid(workerId, 1, secondFamilyId)).toBe(true);
+    expect(getPublicFamilyDirectoryState().families.some((family) => family.id === secondFamilyId)).toBe(true);
   });
 
   it("refuses to disable a family while one of its timers is active", () => {

@@ -73,6 +73,14 @@ export type FamilyEntrySummary = {
   timezone: string;
 };
 
+export type PublicFamilyDirectoryEntry = {
+  id: string;
+  name: string;
+  entryCode: string;
+};
+
+const PUBLIC_FAMILY_DIRECTORY_KEY = "public_family_directory_enabled";
+
 const USERNAME_PATTERN = /^[\p{L}\p{N}][\p{L}\p{N}._-]*$/u;
 
 function requestId(value?: string) {
@@ -247,6 +255,28 @@ export function getActiveFamilySummary(familyId: string): FamilyEntrySummary | n
     WHERE id = ? AND status = 'active'
   `).get(familyId) as FamilyEntrySummary | undefined;
   return family || null;
+}
+
+export function getPublicFamilyDirectoryState(): {
+  enabled: boolean;
+  families: PublicFamilyDirectoryEntry[];
+} {
+  const db = getDb();
+  const setting = db.prepare("SELECT value FROM system_settings WHERE key = ?")
+    .get(PUBLIC_FAMILY_DIRECTORY_KEY) as { value: string } | undefined;
+  const enabled = setting?.value !== "0";
+  if (!enabled) return { enabled, families: [] };
+  const families = (db.prepare(`
+    SELECT id, name, entry_code
+    FROM families
+    WHERE status = 'active'
+    ORDER BY created_at, id
+  `).all() as Array<{ id: string; name: string; entry_code: string }>).map((family) => ({
+    id: family.id,
+    name: family.name,
+    entryCode: family.entry_code,
+  }));
+  return { enabled, families };
 }
 
 export function getAuthorizedBossContext(
@@ -526,6 +556,7 @@ export function rotateBossFamilyEntryCode(
 
 export function getSystemManagementState() {
   const db = getDb();
+  const directory = getPublicFamilyDirectoryState();
   const families = (db.prepare(`
     SELECT family.*,
       COUNT(DISTINCT membership.boss_id) AS boss_count,
@@ -572,7 +603,38 @@ export function getSystemManagementState() {
     detail: row.detail,
     createdAt: row.created_at,
   }));
-  return { families, bosses, auditLogs };
+  return {
+    settings: { publicFamilyDirectoryEnabled: directory.enabled },
+    families,
+    bosses,
+    auditLogs,
+  };
+}
+
+export function setPublicFamilyDirectory(input: {
+  enabled: boolean;
+  requestId?: string;
+}) {
+  const mutationId = requestId(input.requestId);
+  const db = getDb();
+  db.transaction(() => {
+    if (previousSystemAudit(db, mutationId)) return;
+    const now = Date.now();
+    db.prepare(`
+      INSERT INTO system_settings(key, value, updated_at)
+      VALUES (?, ?, ?)
+      ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+    `).run(PUBLIC_FAMILY_DIRECTORY_KEY, input.enabled ? "1" : "0", now);
+    systemAudit(
+      db,
+      input.enabled ? "public_family_directory_enabled" : "public_family_directory_disabled",
+      "system_setting",
+      PUBLIC_FAMILY_DIRECTORY_KEY,
+      input.enabled ? "开启首页家庭选择" : "关闭首页家庭选择",
+      mutationId,
+      now,
+    );
+  }).immediate();
 }
 
 export function createFamily(input: {

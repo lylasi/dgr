@@ -5,6 +5,7 @@ import {
   createFamily,
   getSystemManagementState,
   rotateFamilyEntryCode,
+  setPublicFamilyDirectory,
   setBossFamilyMembership,
   updateBossAccount,
   updateFamily,
@@ -20,6 +21,11 @@ const familyId = z.string().uuid();
 const bossId = z.string().uuid();
 
 const mutationSchema = z.discriminatedUnion("action", [
+  z.object({
+    action: z.literal("set_public_family_directory"),
+    enabled: z.boolean(),
+    requestId,
+  }),
   z.object({
     action: z.literal("create_family"),
     name: z.string().trim().min(1).max(60),
@@ -83,6 +89,9 @@ export async function POST(request: NextRequest) {
     requireSystemAdmin(request);
     const input = mutationSchema.parse(await request.json());
     switch (input.action) {
+      case "set_public_family_directory":
+        setPublicFamilyDirectory(input);
+        break;
       case "create_family":
         createFamily(input);
         break;

@@ -5,10 +5,31 @@ import {
   migrateBossFamilyProfileSchema,
   migrateBusinessActorSchema,
   migrateFamilySchema,
+  migratePublicFamilyDirectorySchema,
   migrateRepeatableTaskSchema,
   migrateRewardSchema,
   migrateTaskRewardSchema,
 } from "@/lib/db";
+
+describe("public family directory database migration", () => {
+  it("enables the directory by default without overwriting a later administrator choice", () => {
+    const db = new Database(":memory:");
+    db.exec("CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY, applied_at INTEGER NOT NULL)");
+
+    migratePublicFamilyDirectorySchema(db, 13);
+    expect(db.prepare("SELECT value FROM system_settings WHERE key = ?")
+      .get("public_family_directory_enabled")).toEqual({ value: "1" });
+    expect(db.prepare("SELECT version FROM schema_migrations WHERE version = 13").get())
+      .toEqual({ version: 13 });
+
+    db.prepare("UPDATE system_settings SET value = '0' WHERE key = ?")
+      .run("public_family_directory_enabled");
+    migratePublicFamilyDirectorySchema(db, 14);
+    expect(db.prepare("SELECT value FROM system_settings WHERE key = ?")
+      .get("public_family_directory_enabled")).toEqual({ value: "0" });
+    db.close();
+  });
+});
 
 describe("boss family profile database migration", () => {
   it("adds an optional per-family display name without changing existing memberships", () => {

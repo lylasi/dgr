@@ -3,6 +3,8 @@
 import {
   Building2,
   Clipboard,
+  Eye,
+  EyeOff,
   KeyRound,
   Link2,
   Pencil,
@@ -103,6 +105,12 @@ export function SystemAdminApp({
       <main className="page-enter mx-auto w-full max-w-4xl space-y-8 px-4 pb-8 sm:px-6">
         <SystemOverview state={state} />
 
+        <PublicFamilyDirectorySetting
+          enabled={state.settings.publicFamilyDirectoryEnabled}
+          busy={busy}
+          mutate={mutate}
+        />
+
         <section>
           <div className="flex items-start justify-between gap-3">
             <SectionTitle title="家庭" text="家庭使用系统统一时区；入口轮换后，旧链接和旧二维码立即失效。" />
@@ -171,6 +179,45 @@ export function SystemOverview({ state }: { state: SystemManagementState }) {
         <SummaryCard icon={UserCog} value={activeBosses} label="启用老板" />
         <SummaryCard icon={ShieldCheck} value={workers} label="小朋友总数" />
       </div>
+    </section>
+  );
+}
+
+export function PublicFamilyDirectorySetting({
+  enabled,
+  busy,
+  mutate,
+}: {
+  enabled: boolean;
+  busy: boolean;
+  mutate: Mutate;
+}) {
+  return (
+    <section className="app-card flex flex-col gap-4 p-5 sm:flex-row sm:items-center sm:justify-between">
+      <div className="flex items-start gap-3">
+        <div className={`grid h-11 w-11 shrink-0 place-items-center rounded-2xl ${enabled ? "bg-emerald-100 text-emerald-700" : "bg-slate-100 text-slate-500"}`}>
+          {enabled ? <Eye size={23} /> : <EyeOff size={23} />}
+        </div>
+        <div>
+          <h2 className="font-black">首页家庭选择</h2>
+          <p className="mt-1 text-sm font-semibold leading-6 text-slate-500">
+            {enabled
+              ? "已公开显示所有启用中的家庭；访客需要先选择家庭。"
+              : "已隐藏家庭列表；老板和小朋友只能使用家庭专属入口。"}
+          </p>
+        </div>
+      </div>
+      <button
+        type="button"
+        className={`${enabled ? "danger-button" : "success-button"} shrink-0`}
+        disabled={busy}
+        onClick={() => void mutate(
+          { action: "set_public_family_directory", enabled: !enabled },
+          enabled ? "首页家庭列表已隐藏" : "首页家庭列表已公开",
+        )}
+      >
+        {enabled ? "关闭首页展示" : "开启首页展示"}
+      </button>
     </section>
   );
 }

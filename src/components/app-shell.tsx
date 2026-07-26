@@ -117,6 +117,9 @@ export function AppShell({ entryCode }: { entryCode?: string }) {
   if (identity.type === "system_admin") {
     return <SystemAdminApp onSwitch={chooseRole} onAuthorizationError={authorizationExpired} />;
   }
+  if (!bootstrap.family) {
+    return <LoginScreen bootstrap={bootstrap} entryCode={entryCode} onEntered={entered} />;
+  }
   if (identity.type === "boss") {
     return (
       <AdminApp

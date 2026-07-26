@@ -1,7 +1,7 @@
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
-import { LoginScreen } from "@/components/login-screen";
+import { familyEntryPathFromInput, LoginScreen } from "@/components/login-screen";
 import { FamilyEntryQr } from "@/components/family-entry-qr";
 import type { BootstrapState, SystemBoss, SystemFamily } from "@/components/types";
 import {
@@ -11,12 +11,15 @@ import {
   CreateBoss,
   CreateFamily,
   FamilyCard,
+  PublicFamilyDirectorySetting,
   SystemOverview,
 } from "@/components/system-admin-app";
 import { BossActingBanner } from "@/components/worker-app";
 
 const bootstrap: BootstrapState = {
   family: { id: "family-a", name: "星星家庭", timezone: "Asia/Shanghai" },
+  publicFamilyDirectoryEnabled: false,
+  publicFamilies: [],
   workers: [{
     id: "worker-a",
     familyId: "family-a",
@@ -77,6 +80,7 @@ describe("多家庭角色界面", () => {
   it("系统后台概况只呈现系统管理边界和汇总数量", () => {
     const markup = renderToStaticMarkup(createElement(SystemOverview, {
       state: {
+        settings: { publicFamilyDirectoryEnabled: true },
         families: [{
           id: "family-a",
           name: "星星家庭",
@@ -98,6 +102,73 @@ describe("多家庭角色界面", () => {
     expect(markup).toContain("小朋友总数");
     expect(markup).not.toContain("发布任务");
     expect(markup).not.toContain("余额明细");
+  });
+
+  it("根首页公开家庭目录时只显示家庭选择，不提前显示小朋友", () => {
+    const markup = renderToStaticMarkup(createElement(LoginScreen, {
+      bootstrap: {
+        ...bootstrap,
+        family: null,
+        workers: [],
+        activeIdentity: null,
+        publicFamilyDirectoryEnabled: true,
+        publicFamilies: [
+          { id: "family-a", name: "星星家庭", entryCode: "entry-code-for-family-a" },
+          { id: "family-b", name: "月亮家庭", entryCode: "entry-code-for-family-b" },
+        ],
+      },
+      onEntered: vi.fn(),
+    }));
+
+    expect(markup).toContain("请选择要进入的家庭");
+    expect(markup).toContain("星星家庭");
+    expect(markup).toContain("月亮家庭");
+    expect(markup).toContain("/family/entry-code-for-family-a");
+    expect(markup).toContain("已有家庭入口");
+    expect(markup).toContain("家庭链接或入口码");
+    expect(markup).toContain("直接进入");
+    expect(markup).not.toContain("小星");
+  });
+
+  it("关闭家庭目录后根首页只提示使用专属入口", () => {
+    const markup = renderToStaticMarkup(createElement(LoginScreen, {
+      bootstrap: {
+        ...bootstrap,
+        family: null,
+        workers: [],
+        activeIdentity: null,
+        publicFamilyDirectoryEnabled: false,
+        publicFamilies: [],
+      },
+      onEntered: vi.fn(),
+    }));
+    const settingMarkup = renderToStaticMarkup(createElement(PublicFamilyDirectorySetting, {
+      enabled: false,
+      busy: false,
+      mutate: vi.fn(async () => true),
+    }));
+
+    expect(markup).toContain("家庭列表暂未公开");
+    expect(markup).toContain("请使用家庭专属入口");
+    expect(markup).toContain("已有家庭入口");
+    expect(markup).toContain("直接进入");
+    expect(markup).toContain("系统维护入口");
+    expect(markup).not.toContain("星星家庭");
+    expect(settingMarkup).toContain("开启首页展示");
+    expect(settingMarkup).toContain("只能使用家庭专属入口");
+  });
+
+  it("家庭地址输入只提取入口码并始终跳转到当前系统", () => {
+    const entryCode = "entry-code-for-family-a";
+    expect(familyEntryPathFromInput(entryCode)).toBe(`/family/${entryCode}`);
+    expect(familyEntryPathFromInput(`/family/${entryCode}`)).toBe(`/family/${entryCode}`);
+    expect(familyEntryPathFromInput(`http://192.168.1.8:3000/family/${entryCode}?from=qr`))
+      .toBe(`/family/${entryCode}`);
+    expect(familyEntryPathFromInput(`example.com/family/${entryCode}`)).toBe(`/family/${entryCode}`);
+    expect(familyEntryPathFromInput(`https://another.example/family/${entryCode}`))
+      .toBe(`/family/${entryCode}`);
+    expect(familyEntryPathFromInput("https://another.example/not-a-family")).toBeNull();
+    expect(familyEntryPathFromInput("short-code")).toBeNull();
   });
 
   it("系统家庭管理默认使用紧凑列表，并通过弹窗创建和编辑", () => {

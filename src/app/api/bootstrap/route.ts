@@ -3,9 +3,9 @@ import {
   getActiveFamilyByEntryCode,
   getActiveFamilySummary,
   getAuthorizedBossSummary,
+  getPublicFamilyDirectoryState,
 } from "@/lib/account-service";
 import { businessContextFromSession } from "@/lib/business-session";
-import { DEFAULT_FAMILY_ID } from "@/lib/db";
 import { AppError, jsonError, jsonOk } from "@/lib/http";
 import {
   listPublicWorkers,
@@ -53,13 +53,12 @@ export async function GET(request: NextRequest) {
       ? activeContext?.familyId || null
       : null;
     const family = entryFamily
-      || (activeFamilyId ? getActiveFamilySummary(activeFamilyId) : null)
-      || getActiveFamilySummary(DEFAULT_FAMILY_ID);
-    if (!family) {
+      || (activeFamilyId ? getActiveFamilySummary(activeFamilyId) : null);
+    if ((entryFamily || activeFamilyId) && !family) {
       throw new AppError("当前没有可用的家庭入口。", 404, "FAMILY_NOT_FOUND");
     }
 
-    const workers = listPublicWorkers(family.id).map((worker) => ({
+    const workers = family ? listPublicWorkers(family.id).map((worker) => ({
       id: worker.id,
       familyId: worker.familyId,
       name: worker.name,
@@ -69,13 +68,18 @@ export async function GET(request: NextRequest) {
         ? `${worker.avatarUrl}&entryCode=${encodeURIComponent(entryCode)}`
         : worker.avatarUrl,
       authorized: Boolean(session.workers[worker.id]),
-    }));
+    })) : [];
+    const publicDirectory = entryCodeParameter === null && !activeFamilyId
+      ? getPublicFamilyDirectoryState()
+      : { enabled: false, families: [] };
     const systemAdminAuthorized = isSystemAdminAuthorized(session);
     const entryConflictsWithActiveFamily = Boolean(
       entryFamily && activeFamilyId && entryFamily.id !== activeFamilyId,
     );
     const response = jsonOk({
       family,
+      publicFamilyDirectoryEnabled: publicDirectory.enabled,
+      publicFamilies: publicDirectory.families,
       workers,
       bosses,
       systemAdminAuthorized,

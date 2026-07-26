@@ -9,7 +9,7 @@ declare global {
   var __penWorkerSchemaVersion: number | undefined;
 }
 
-const CURRENT_SCHEMA_VERSION = 12;
+const CURRENT_SCHEMA_VERSION = 13;
 
 // Stable compatibility tenant for migrated rows and the root family picker.
 export const DEFAULT_FAMILY_ID = "00000000-0000-4000-8000-000000000001";
@@ -67,6 +67,14 @@ CREATE INDEX IF NOT EXISTS idx_system_audit_logs_created
   ON system_audit_logs(created_at DESC);
 `;
 
+const SYSTEM_SETTINGS_SCHEMA = `
+CREATE TABLE IF NOT EXISTS system_settings (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+`;
+
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS schema_migrations (
   version INTEGER PRIMARY KEY,
@@ -75,6 +83,7 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 
 ${FAMILY_SCHEMA}
 ${SYSTEM_ACCOUNT_SCHEMA}
+${SYSTEM_SETTINGS_SCHEMA}
 
 CREATE TABLE IF NOT EXISTS workers (
   id TEXT PRIMARY KEY,
@@ -1154,6 +1163,18 @@ export function migrateBossFamilyProfileSchema(db: Database.Database, now = Date
   db.prepare("INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (12, ?)").run(now);
 }
 
+export function migratePublicFamilyDirectorySchema(
+  db: Database.Database,
+  now = Date.now(),
+): void {
+  db.exec(SYSTEM_SETTINGS_SCHEMA);
+  db.prepare(`
+    INSERT OR IGNORE INTO system_settings(key, value, updated_at)
+    VALUES ('public_family_directory_enabled', '1', ?)
+  `).run(now);
+  db.prepare("INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (13, ?)").run(now);
+}
+
 function initializeDatabase(db: Database.Database) {
   db.pragma("foreign_keys = ON");
   db.pragma("busy_timeout = 5000");
@@ -1173,6 +1194,7 @@ function initializeDatabase(db: Database.Database) {
   migrateSystemAccountSchema(db, now);
   migrateBusinessActorSchema(db, now);
   migrateBossFamilyProfileSchema(db, now);
+  migratePublicFamilyDirectorySchema(db, now);
   const seed = db.prepare(`
     INSERT OR IGNORE INTO consumption_activities
       (id, name, icon, sort_order, is_active, created_at, updated_at)
